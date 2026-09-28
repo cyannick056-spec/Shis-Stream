@@ -14,6 +14,7 @@ import io.livekit.android.room.track.LocalVideoTrack
 import io.livekit.android.room.track.Track
 import io.livekit.android.room.track.screencapture.ScreenCaptureParams
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -30,6 +31,7 @@ data class StreamUiState(
 class StreamViewModel(application: Application) : AndroidViewModel(application) {
     private val room = LiveKit.create(application)
     private var screenAudioCapturer: ScreenAudioCapturer? = null
+    private var internalAudioEnabled = false
 
     private val _uiState = MutableStateFlow(StreamUiState())
     val uiState: StateFlow<StreamUiState> = _uiState.asStateFlow()
@@ -60,25 +62,45 @@ class StreamViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun startScreenCapture(permissionData: Intent) {
+    fun startScreenCapture(permissionData: Intent, captureInternalAudio: Boolean) {
         val app = getApplication<Application>()
-        if (ActivityCompat.checkSelfPermission(app, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+        if (
+            captureInternalAudio &&
+            ActivityCompat.checkSelfPermission(app, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
+        ) {
             _uiState.value = StreamUiState(status = "Falta permiso de audio")
             return
         }
 
-        app.startForegroundService(Intent(app, StreamForegroundService::class.java))
-        _uiState.value = StreamUiState(status = "Iniciando captura…", busy = true)
+        val serviceIntent = Intent(app, StreamForegroundService::class.java)
+            .putExtra(StreamForegroundService.EXTRA_INTERNAL_AUDIO, captureInternalAudio)
+        app.startForegroundService(serviceIntent)
+
+        _uiState.value = StreamUiState(
+            status = if (captureInternalAudio) "Iniciando video + audio experimental…" else "Iniciando video seguro…",
+            busy = true,
+        )
 
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                internalAudioEnabled = false
                 room.localParticipant.setScreenShareEnabled(
                     true,
                     ScreenCaptureParams(permissionData),
                 )
 
-                // Switchroot workaround: keep the physical microphone closed.
-                // LiveKit still provides the audio transport that receives Android playback capture.
+                if (!captureInternalAudio) {
+                    _uiState.value = StreamUiState(
+                        status = "● TRANSMITIENDO — SOLO VIDEO (modo seguro)",
+                        streaming = true,
+                    )
+                    return@launch
+                }
+
+                // Give Switchroot time to stabilize MediaProjection before touching audio.
+                delay(800)
+
+                // Experimental path. This is intentionally isolated so Solo video never opens AudioRecord.
                 (room.lkObjects.audioDeviceModule as? JavaAudioDeviceModule)
                     ?.setAudioRecordEnabled(false)
 
@@ -99,18 +121,28 @@ class StreamViewModel(application: Application) : AndroidViewModel(application) 
 
                 screenAudioCapturer?.gain = 1.0f
                 audioTrack.setAudioBufferCallback(screenAudioCapturer!!)
+                internalAudioEnabled = true
 
                 _uiState.value = StreamUiState(
-                    status = "● TRANSMITIENDO — abre tu emulador",
+                    status = "● TRANSMITIENDO — VIDEO + AUDIO INTERNO (experimental)",
                     streaming = true,
                 )
             } catch (t: Throwable) {
-                try {
-                    stopInternal()
-                } catch (_: Throwable) {
-                    // Keep the original startup error for the UI.
+                if (captureInternalAudio) {
+                    // If the audio setup fails with a recoverable Java/Kotlin error, keep video alive.
+                    runCatching { disableInternalAudioOnly() }
+                    _uiState.value = StreamUiState(
+                        status = "● VIDEO ACTIVO — audio interno falló: ${t.message ?: t.javaClass.simpleName}",
+                        streaming = true,
+                    )
+                } else {
+                    try {
+                        stopInternal()
+                    } catch (_: Throwable) {
+                        // Keep the original startup error for the UI.
+                    }
+                    _uiState.value = StreamUiState(status = "Error al iniciar video: ${t.message ?: t.javaClass.simpleName}")
                 }
-                _uiState.value = StreamUiState(status = "Error al iniciar stream: ${t.message ?: t.javaClass.simpleName}")
             }
         }
     }
@@ -123,12 +155,23 @@ class StreamViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private suspend fun stopInternal() {
+    private suspend fun disableInternalAudioOnly() {
         runCatching {
             (room.localParticipant.getTrackPublication(Track.Source.MICROPHONE)?.track as? LocalAudioTrack)
                 ?.setAudioBufferCallback(null)
         }
         runCatching { room.localParticipant.setMicrophoneEnabled(false) }
+        screenAudioCapturer?.releaseAudioResources()
+        screenAudioCapturer = null
+        internalAudioEnabled = false
+    }
+
+    private suspend fun stopInternal() {
+        if (internalAudioEnabled || screenAudioCapturer != null) {
+            disableInternalAudioOnly()
+        } else {
+            runCatching { room.localParticipant.setMicrophoneEnabled(false) }
+        }
         runCatching { room.localParticipant.setScreenShareEnabled(false) }
         releaseLocalResources()
         runCatching { room.disconnect() }
@@ -137,6 +180,7 @@ class StreamViewModel(application: Application) : AndroidViewModel(application) 
     private fun releaseLocalResources() {
         screenAudioCapturer?.releaseAudioResources()
         screenAudioCapturer = null
+        internalAudioEnabled = false
         getApplication<Application>().stopService(Intent(getApplication(), StreamForegroundService::class.java))
     }
 
