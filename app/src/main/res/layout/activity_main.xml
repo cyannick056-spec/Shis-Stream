@@ -14,7 +14,7 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="SHIS STREAM v0.2"
+            android:text="SHIS STREAM v0.3"
             android:textColor="#FFFFFF"
             android:textSize="26sp"
             android:textStyle="bold" />
@@ -23,7 +23,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="Switch Android → Discord Activity"
+            android:text="Switchroot compatibility: 360p / 15 FPS / H.264"
             android:textColor="#AEB5C2"
             android:textSize="14sp" />
 
@@ -44,7 +44,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="20dp"
             android:backgroundTint="#5865F2"
-            android:hint="Servidor HTTPS (ej. https://shis-stream.example.com)"
+            android:hint="Servidor HTTPS"
             android:inputType="textUri"
             android:singleLine="true"
             android:textColor="#FFFFFF"
@@ -82,7 +82,7 @@
             android:layout_marginTop="16dp"
             android:buttonTint="#5865F2"
             android:checked="false"
-            android:text="Audio interno experimental (puede fallar en Switchroot)"
+            android:text="Audio interno experimental"
             android:textColor="#DDE2EA"
             android:textSize="14sp" />
 
@@ -90,7 +90,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="Déjalo desmarcado para probar Solo video. En ese modo SHIS Stream no abre AudioRecord ni solicita acceso al micrófono."
+            android:text="Para diagnosticar el crash, déjalo desmarcado. Solo video usa el perfil de compatibilidad 360p/15 FPS H.264 y no abre AudioRecord."
             android:textColor="#8D95A5"
             android:textSize="12sp" />
 
@@ -129,7 +129,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="18dp"
-            android:text="Primera prueba recomendada: Solo video. Si se mantiene estable, luego activa Audio interno experimental para aislar el crash de Switchroot."
+            android:text="Si esta versión todavía se cierra, necesitaremos logcat: eso indicará si falla MediaCodec, Surface/EGL o MediaProjection dentro de Switchroot."
             android:textColor="#8D95A5"
             android:textSize="12sp" />
 
