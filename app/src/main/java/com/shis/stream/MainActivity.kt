@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.os.Bundle
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.TextView
 import androidx.activity.ComponentActivity
@@ -25,14 +26,21 @@ class MainActivity : ComponentActivity() {
     private lateinit var backendInput: EditText
     private lateinit var streamInput: EditText
     private lateinit var keyInput: EditText
+    private lateinit var audioModeCheckBox: CheckBox
     private lateinit var startButton: Button
     private lateinit var stopButton: Button
+
+    private var pendingCaptureInternalAudio = false
 
     private val micPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        if (granted) beginConnection()
-        else statusText.text = "Discord no está involucrado aquí, pero Android exige RECORD_AUDIO para capturar audio interno."
+        if (granted) {
+            beginConnection(captureInternalAudio = true)
+        } else {
+            audioModeCheckBox.isChecked = false
+            statusText.text = "Permiso de audio rechazado. Puedes transmitir en modo Solo video."
+        }
     }
 
     private val captureLauncher = registerForActivityResult(
@@ -40,7 +48,7 @@ class MainActivity : ComponentActivity() {
     ) { result ->
         val data = result.data
         if (result.resultCode == Activity.RESULT_OK && data != null) {
-            viewModel.startScreenCapture(data)
+            viewModel.startScreenCapture(data, pendingCaptureInternalAudio)
         } else {
             statusText.text = "Captura cancelada"
         }
@@ -54,6 +62,7 @@ class MainActivity : ComponentActivity() {
         backendInput = findViewById(R.id.backendInput)
         streamInput = findViewById(R.id.streamInput)
         keyInput = findViewById(R.id.keyInput)
+        audioModeCheckBox = findViewById(R.id.audioModeCheckBox)
         startButton = findViewById(R.id.startButton)
         stopButton = findViewById(R.id.stopButton)
 
@@ -61,10 +70,17 @@ class MainActivity : ComponentActivity() {
         backendInput.setText(prefs.getString("api_base", ""))
         streamInput.setText(prefs.getString("stream_name", "cris"))
         keyInput.setText(prefs.getString("stream_key", ""))
+        audioModeCheckBox.isChecked = prefs.getBoolean("capture_internal_audio", false)
 
         startButton.setOnClickListener {
+            val wantsAudio = audioModeCheckBox.isChecked
+            if (!wantsAudio) {
+                beginConnection(captureInternalAudio = false)
+                return@setOnClickListener
+            }
+
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                beginConnection()
+                beginConnection(captureInternalAudio = true)
             } else {
                 micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             }
@@ -78,21 +94,24 @@ class MainActivity : ComponentActivity() {
                     statusText.text = state.status
                     startButton.isEnabled = !state.busy && !state.streaming
                     stopButton.isEnabled = state.streaming || state.busy
+                    audioModeCheckBox.isEnabled = !state.busy && !state.streaming
                 }
             }
         }
     }
 
-    private fun beginConnection() {
+    private fun beginConnection(captureInternalAudio: Boolean) {
         val apiBase = backendInput.text.toString().trim()
         val streamName = streamInput.text.toString().trim()
         val streamKey = keyInput.text.toString()
+        pendingCaptureInternalAudio = captureInternalAudio
 
         getSharedPreferences("shis_stream", Context.MODE_PRIVATE)
             .edit()
             .putString("api_base", apiBase)
             .putString("stream_name", streamName)
             .putString("stream_key", streamKey)
+            .putBoolean("capture_internal_audio", captureInternalAudio)
             .apply()
 
         lifecycleScope.launch {
