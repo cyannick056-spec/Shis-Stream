@@ -1,0 +1,52 @@
+name: Build SHIS Native Forwarder
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'native/**'
+      - '.github/workflows/native.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkita64:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare NPDM config
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, urllib.request
+          url = 'https://raw.githubusercontent.com/exelix11/SysDVR/master/sysmodule/sysmodule.json'
+          data = json.load(urllib.request.urlopen(url))
+          tid = '0x00FF000053484953'
+          data['name'] = 'shis-forwarder'
+          data['title_id'] = tid
+          data['title_id_range_min'] = tid
+          data['title_id_range_max'] = tid
+          data['main_thread_stack_size'] = '0x00010000'
+          with open('native/config.json', 'w', encoding='utf-8') as f:
+              json.dump(data, f, indent=2)
+          PY
+
+      - name: Build sysmodule
+        run: make -C native -j2
+
+      - name: Package Atmosphere files
+        shell: bash
+        run: |
+          set -eux
+          rm -rf native/release
+          mkdir -p native/release/atmosphere/contents/00FF000053484953/flags
+          mkdir -p native/release/config/shis-forwarder
+          cp native/shis-forwarder.nsp native/release/atmosphere/contents/00FF000053484953/exefs.nsp
+          touch native/release/atmosphere/contents/00FF000053484953/flags/boot2.flag
+          cp native/config.example.ini native/release/config/shis-forwarder/config.ini
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SHIS-Forwarder
+          path: native/release/**
