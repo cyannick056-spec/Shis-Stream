@@ -26,6 +26,7 @@ jobs:
         shell: bash
         run: |
           cp sysdvr-shis/TCPmode.c upstream/sysmodule/source/modes/TCPmode.c
+          printf '\nint g_tcpEnableBroadcast = 0;\n' >> upstream/sysmodule/source/modes/TCPmode.c
 
       - name: Build SysDVR SHIS sysmodule
         shell: bash
