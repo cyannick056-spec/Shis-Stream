@@ -9,9 +9,13 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.livekit.android.LiveKit
 import io.livekit.android.audio.ScreenAudioCapturer
+import io.livekit.android.room.participant.VideoTrackPublishDefaults
 import io.livekit.android.room.track.LocalAudioTrack
 import io.livekit.android.room.track.LocalVideoTrack
+import io.livekit.android.room.track.LocalVideoTrackOptions
+import io.livekit.android.room.track.ScreenSharePresets
 import io.livekit.android.room.track.Track
+import io.livekit.android.room.track.VideoCodec
 import io.livekit.android.room.track.screencapture.ScreenCaptureParams
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -36,6 +40,19 @@ class StreamViewModel(application: Application) : AndroidViewModel(application) 
     private val _uiState = MutableStateFlow(StreamUiState())
     val uiState: StateFlow<StreamUiState> = _uiState.asStateFlow()
 
+    private fun applySwitchrootCompatibilityProfile() {
+        val preset = ScreenSharePresets.H360_FPS15
+        room.screenShareTrackCaptureDefaults = LocalVideoTrackOptions(
+            isScreencast = true,
+            captureParams = preset.capture,
+        )
+        room.screenShareTrackPublishDefaults = VideoTrackPublishDefaults(
+            videoEncoding = preset.encoding,
+            simulcast = false,
+            videoCodec = VideoCodec.H264.codecName,
+        )
+    }
+
     suspend fun prepareConnection(apiBase: String, streamName: String, streamKey: String): Boolean {
         if (apiBase.isBlank() || streamName.isBlank() || streamKey.isBlank()) {
             _uiState.value = StreamUiState(status = "Falta servidor, nombre o clave")
@@ -49,10 +66,11 @@ class StreamViewModel(application: Application) : AndroidViewModel(application) 
             }
             withContext(Dispatchers.IO) {
                 runCatching { room.disconnect() }
+                applySwitchrootCompatibilityProfile()
                 room.connect(credentials.serverUrl, credentials.token)
             }
             _uiState.value = StreamUiState(
-                status = "Conectado a ${credentials.roomName}. Autoriza la captura de pantalla.",
+                status = "Conectado a ${credentials.roomName}. Perfil compatibilidad 360p/15 H.264 listo.",
                 busy = false,
             )
             true
@@ -77,7 +95,11 @@ class StreamViewModel(application: Application) : AndroidViewModel(application) 
         app.startForegroundService(serviceIntent)
 
         _uiState.value = StreamUiState(
-            status = if (captureInternalAudio) "Iniciando video + audio experimental…" else "Iniciando video seguro…",
+            status = if (captureInternalAudio) {
+                "Iniciando 360p/15 H.264 + audio experimental…"
+            } else {
+                "Iniciando 360p/15 H.264 — compatibilidad Switchroot…"
+            },
             busy = true,
         )
 
@@ -91,16 +113,14 @@ class StreamViewModel(application: Application) : AndroidViewModel(application) 
 
                 if (!captureInternalAudio) {
                     _uiState.value = StreamUiState(
-                        status = "● TRANSMITIENDO — SOLO VIDEO (modo seguro)",
+                        status = "● TRANSMITIENDO — 360p/15 H.264 SOLO VIDEO",
                         streaming = true,
                     )
                     return@launch
                 }
 
-                // Give Switchroot time to stabilize MediaProjection before touching audio.
                 delay(800)
 
-                // Experimental path. This is intentionally isolated so Solo video never opens AudioRecord.
                 (room.lkObjects.audioDeviceModule as? JavaAudioDeviceModule)
                     ?.setAudioRecordEnabled(false)
 
@@ -124,12 +144,11 @@ class StreamViewModel(application: Application) : AndroidViewModel(application) 
                 internalAudioEnabled = true
 
                 _uiState.value = StreamUiState(
-                    status = "● TRANSMITIENDO — VIDEO + AUDIO INTERNO (experimental)",
+                    status = "● TRANSMITIENDO — 360p/15 H.264 + AUDIO INTERNO",
                     streaming = true,
                 )
             } catch (t: Throwable) {
                 if (captureInternalAudio) {
-                    // If the audio setup fails with a recoverable Java/Kotlin error, keep video alive.
                     runCatching { disableInternalAudioOnly() }
                     _uiState.value = StreamUiState(
                         status = "● VIDEO ACTIVO — audio interno falló: ${t.message ?: t.javaClass.simpleName}",
@@ -139,7 +158,6 @@ class StreamViewModel(application: Application) : AndroidViewModel(application) 
                     try {
                         stopInternal()
                     } catch (_: Throwable) {
-                        // Keep the original startup error for the UI.
                     }
                     _uiState.value = StreamUiState(status = "Error al iniciar video: ${t.message ?: t.javaClass.simpleName}")
                 }
@@ -185,7 +203,6 @@ class StreamViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     override fun onCleared() {
-        // ViewModel scope is already being cancelled here, so only perform synchronous cleanup.
         releaseLocalResources()
         runCatching { room.disconnect() }
         room.release()
