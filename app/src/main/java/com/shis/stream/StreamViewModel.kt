@@ -21,7 +21,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import livekit.org.webrtc.audio.JavaAudioDeviceModule
 
-internal data class StreamUiState(
+data class StreamUiState(
     val status: String = "Listo",
     val busy: Boolean = false,
     val streaming: Boolean = false,
@@ -77,8 +77,8 @@ class StreamViewModel(application: Application) : AndroidViewModel(application) 
                     ScreenCaptureParams(permissionData),
                 )
 
-                // Important for Switchroot: do not open the physical microphone.
-                // We only need the LiveKit audio transport for Android's playback capture.
+                // Switchroot workaround: keep the physical microphone closed.
+                // LiveKit still provides the audio transport that receives Android playback capture.
                 (room.lkObjects.audioDeviceModule as? JavaAudioDeviceModule)
                     ?.setAudioRecordEnabled(false)
 
@@ -105,7 +105,11 @@ class StreamViewModel(application: Application) : AndroidViewModel(application) 
                     streaming = true,
                 )
             } catch (t: Throwable) {
-                runCatching { stopInternal() }
+                try {
+                    stopInternal()
+                } catch (_: Throwable) {
+                    // Keep the original startup error for the UI.
+                }
                 _uiState.value = StreamUiState(status = "Error al iniciar stream: ${t.message ?: t.javaClass.simpleName}")
             }
         }
@@ -119,21 +123,27 @@ class StreamViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private fun stopInternal() {
+    private suspend fun stopInternal() {
         runCatching {
             (room.localParticipant.getTrackPublication(Track.Source.MICROPHONE)?.track as? LocalAudioTrack)
                 ?.setAudioBufferCallback(null)
         }
         runCatching { room.localParticipant.setMicrophoneEnabled(false) }
         runCatching { room.localParticipant.setScreenShareEnabled(false) }
+        releaseLocalResources()
+        runCatching { room.disconnect() }
+    }
+
+    private fun releaseLocalResources() {
         screenAudioCapturer?.releaseAudioResources()
         screenAudioCapturer = null
-        runCatching { room.disconnect() }
         getApplication<Application>().stopService(Intent(getApplication(), StreamForegroundService::class.java))
     }
 
     override fun onCleared() {
-        stopInternal()
+        // ViewModel scope is already being cancelled here, so only perform synchronous cleanup.
+        releaseLocalResources()
+        runCatching { room.disconnect() }
         room.release()
         super.onCleared()
     }
