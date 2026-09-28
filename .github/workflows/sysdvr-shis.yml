@@ -1,0 +1,65 @@
+name: Build SysDVR SHIS Direct
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'sysdvr-shis/**'
+      - '.github/workflows/sysdvr-shis.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkita64:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch pinned SysDVR 6.3 source
+        shell: bash
+        run: |
+          git clone https://github.com/exelix11/SysDVR.git upstream
+          cd upstream
+          git checkout 804fd36e54983b7c76b249059b159f896af35b4d
+
+      - name: Install SHIS direct transport
+        shell: bash
+        run: |
+          cp sysdvr-shis/TCPmode.c upstream/sysmodule/source/modes/TCPmode.c
+
+      - name: Build SysDVR SHIS sysmodule
+        shell: bash
+        run: |
+          make -C upstream/sysmodule clean
+          make -C upstream/sysmodule -j2
+          strings upstream/sysmodule/sysmodule.nsp | grep 'SYSDVR_BUILD_FULL'
+
+      - name: Package test build
+        shell: bash
+        run: |
+          set -eux
+          OUT=release
+          rm -rf "$OUT"
+          mkdir -p "$OUT/atmosphere/contents/00FF0000A53BB665/flags"
+          mkdir -p "$OUT/config/sysdvr"
+          cp upstream/sysmodule/sysmodule.nsp "$OUT/atmosphere/contents/00FF0000A53BB665/exefs.nsp"
+          cp upstream/sysmodule/toolbox.json "$OUT/atmosphere/contents/00FF0000A53BB665/toolbox.json"
+          touch "$OUT/atmosphere/contents/00FF0000A53BB665/flags/boot2.flag"
+          touch "$OUT/config/sysdvr/tcp"
+          cat > "$OUT/config/sysdvr/shis.ini" <<'EOF'
+          relay_host=YOUR_RELAY_HOST
+          relay_port=YOUR_RELAY_PORT
+          stream=cris
+          stream_key=YOUR_STREAM_KEY
+          EOF
+          cat > "$OUT/LEEME_SHIS_SYSDVR.txt" <<'EOF'
+          SysDVR-SHIS experimental video-only build.
+          The normal TCP mode is temporarily replaced by SHIS direct output.
+          Remove/disable the separate SHIS Forwarder before testing this build.
+          Restore the official SysDVR exefs.nsp to return to normal TCP mode.
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SysDVR-SHIS-Direct-v0.1
+          path: release/**
