@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -21,6 +22,7 @@
 #define SYSDVR_HEADER_SIZE 18u
 #define RELAY_HEADER_SIZE 20u
 #define RETRY_NS 3000000000ULL
+#define STARTUP_DELAY_NS 20000000000ULL
 
 #define META_VIDEO (1u << 0)
 #define META_AUDIO (1u << 1)
@@ -33,10 +35,18 @@
 
 u32 __nx_applet_type = AppletType_None;
 u32 __nx_fs_num_sessions = 1;
+u32 __nx_fsdev_direntry_cache_size = 1;
 
-#define INNER_HEAP_SIZE (4u * 1024u * 1024u)
+// v0.1 used a 4 MiB heap plus libnx's default BSD transfer memory. That is
+// needlessly heavy next to SysDVR. Keep SHIS deliberately small and static.
+#define INNER_HEAP_SIZE (1u * 1024u * 1024u)
 static char g_inner_heap[INNER_HEAP_SIZE];
 static uint8_t g_payload[VIDEO_MAX_PAYLOAD];
+
+static bool g_sm_ready;
+static bool g_fs_ready;
+static bool g_socket_ready;
+static bool g_init_ok;
 
 void __libnx_initheap(void) {
     extern char *fake_heap_start;
@@ -50,6 +60,7 @@ typedef struct {
     uint16_t relay_port;
     char stream[64];
     char stream_key[160];
+    bool enabled;
     bool audio;
 } ShisConfig;
 
@@ -71,10 +82,24 @@ static char *trim(char *text) {
     return text;
 }
 
+static bool parse_bool(const char *value, bool fallback) {
+    if (value == NULL || *value == '\0') {
+        return fallback;
+    }
+    if (strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 || strcasecmp(value, "yes") == 0 || strcasecmp(value, "on") == 0) {
+        return true;
+    }
+    if (strcmp(value, "0") == 0 || strcasecmp(value, "false") == 0 || strcasecmp(value, "no") == 0 || strcasecmp(value, "off") == 0) {
+        return false;
+    }
+    return fallback;
+}
+
 static bool load_config(ShisConfig *cfg) {
     memset(cfg, 0, sizeof(*cfg));
     snprintf(cfg->stream, sizeof(cfg->stream), "%s", "cris");
-    cfg->audio = true;
+    cfg->enabled = false;
+    cfg->audio = false;
 
     FILE *f = fopen(CONFIG_PATH, "r");
     if (f == NULL) {
@@ -106,13 +131,42 @@ static bool load_config(ShisConfig *cfg) {
             snprintf(cfg->stream, sizeof(cfg->stream), "%s", value);
         } else if (strcmp(key, "stream_key") == 0) {
             snprintf(cfg->stream_key, sizeof(cfg->stream_key), "%s", value);
+        } else if (strcmp(key, "enabled") == 0) {
+            cfg->enabled = parse_bool(value, cfg->enabled);
         } else if (strcmp(key, "audio") == 0) {
-            cfg->audio = strcmp(value, "0") != 0 && strcasecmp(value, "false") != 0 && strcasecmp(value, "no") != 0;
+            cfg->audio = parse_bool(value, cfg->audio);
         }
     }
     fclose(f);
 
     return cfg->relay_host[0] != '\0' && cfg->relay_port != 0 && cfg->stream_key[0] != '\0';
+}
+
+static bool ensure_network(void) {
+    if (g_socket_ready) {
+        return true;
+    }
+
+    // About 272 KiB of BSD transfer memory instead of libnx's ~2+ MiB
+    // default. We only use three blocking TCP sockets in a single thread.
+    const SocketInitConfig socket_config = {
+        .tcp_tx_buf_size = 0x4000,
+        .tcp_rx_buf_size = 0x4000,
+        .tcp_tx_buf_max_size = 0x10000,
+        .tcp_rx_buf_max_size = 0x10000,
+        .udp_tx_buf_size = 0x1000,
+        .udp_rx_buf_size = 0x1000,
+        .sb_efficiency = 2,
+        .num_bsd_sessions = 1,
+        .bsd_service_type = BsdServiceType_User,
+    };
+
+    Result rc = socketInitialize(&socket_config);
+    if (R_FAILED(rc)) {
+        return false;
+    }
+    g_socket_ready = true;
+    return true;
 }
 
 static int send_all(int fd, const void *data, size_t size) {
@@ -187,7 +241,7 @@ static int connect_tcp(const char *host, uint16_t port) {
 
     struct addrinfo hints;
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
+    hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
 
@@ -204,6 +258,7 @@ static int connect_tcp(const char *host, uint16_t port) {
         }
         int one = 1;
         (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+        (void)setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
         if (connect(fd, it->ai_addr, it->ai_addrlen) == 0) {
             break;
         }
@@ -373,14 +428,16 @@ static int read_and_forward(int source_fd, int relay_fd, bool video) {
 }
 
 static void run_forwarder(const ShisConfig *cfg) {
-    int relay_fd = connect_relay(cfg);
-    if (relay_fd < 0) {
+    // Start from the local source first. This prevents creating short-lived
+    // cloud publishers when SysDVR is not ready yet.
+    int video_fd = connect_sysdvr(VIDEO_PORT, true);
+    if (video_fd < 0) {
         return;
     }
 
-    int video_fd = connect_sysdvr(VIDEO_PORT, true);
-    if (video_fd < 0) {
-        close(relay_fd);
+    int relay_fd = connect_relay(cfg);
+    if (relay_fd < 0) {
+        close(video_fd);
         return;
     }
 
@@ -388,8 +445,8 @@ static void run_forwarder(const ShisConfig *cfg) {
     if (cfg->audio) {
         audio_fd = connect_sysdvr(AUDIO_PORT, false);
         if (audio_fd < 0) {
-            close(video_fd);
             close(relay_fd);
+            close(video_fd);
             return;
         }
     }
@@ -407,7 +464,7 @@ static void run_forwarder(const ShisConfig *cfg) {
     }
 
     for (;;) {
-        int result = poll(fds, count, 5000);
+        int result = poll(fds, count, 1000);
         if (result < 0) {
             if (errno == EINTR) {
                 continue;
@@ -440,44 +497,75 @@ static void run_forwarder(const ShisConfig *cfg) {
     if (audio_fd >= 0) {
         close(audio_fd);
     }
-    close(video_fd);
     close(relay_fd);
+    close(video_fd);
 }
 
 void __attribute__((weak)) __appInit(void) {
+    // Give Atmosphere/SysDVR and the game-facing services time to settle. More
+    // importantly, never fatalThrow from this experimental module: if an
+    // optional service is unavailable SHIS simply stays dormant.
+    svcSleepThread(STARTUP_DELAY_NS);
+
     Result rc = smInitialize();
     if (R_FAILED(rc)) {
-        fatalThrow(rc);
+        return;
     }
+    g_sm_ready = true;
+
     rc = fsInitialize();
     if (R_FAILED(rc)) {
-        fatalThrow(rc);
+        return;
     }
-    rc = socketInitializeDefault();
-    if (R_FAILED(rc)) {
-        fatalThrow(rc);
+    g_fs_ready = true;
+
+    if (fsdevMountSdmc() != 0) {
+        return;
     }
-    (void)fsdevMountSdmc();
+
+    g_init_ok = true;
 }
 
 void __attribute__((weak)) __appExit(void) {
-    fsdevUnmountAll();
-    socketExit();
-    fsExit();
-    smExit();
+    if (g_fs_ready) {
+        fsdevUnmountAll();
+    }
+    if (g_socket_ready) {
+        socketExit();
+        g_socket_ready = false;
+    }
+    if (g_fs_ready) {
+        fsExit();
+        g_fs_ready = false;
+    }
+    if (g_sm_ready) {
+        smExit();
+        g_sm_ready = false;
+    }
 }
 
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
-    svcSleepThread(10000000000ULL);
-
     for (;;) {
-        ShisConfig cfg;
-        if (load_config(&cfg)) {
-            run_forwarder(&cfg);
+        if (!g_init_ok) {
+            svcSleepThread(10000000000ULL);
+            continue;
         }
+
+        ShisConfig cfg;
+        if (!load_config(&cfg) || !cfg.enabled) {
+            svcSleepThread(RETRY_NS);
+            continue;
+        }
+
+        if (!ensure_network()) {
+            svcSleepThread(RETRY_NS);
+            continue;
+        }
+
+        run_forwarder(&cfg);
         svcSleepThread(RETRY_NS);
     }
 
