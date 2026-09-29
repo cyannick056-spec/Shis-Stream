@@ -15,11 +15,16 @@
 #define SHIS_AUTH_MAX 320
 #define SHIS_RELAY_HEADER_SIZE 20
 #define SHIS_RETRY_NS 2000000000ULL
+#define SHIS_AUDIO_WAIT_NS 100000000ULL
 
 #define SHIS_KIND_VIDEO 1u
+#define SHIS_KIND_AUDIO 2u
 
 static char ConfigBuffer[SHIS_CONFIG_MAX];
 static u8 DnsBuffer[SHIS_DNS_MAX];
+static Mutex RelayMutex;
+static int RelaySocket = SOCKET_INVALID;
+static u32 RelayGeneration = 0;
 
 typedef struct {
     char host[128];
@@ -70,30 +75,20 @@ static bool ParsePort(const char* text, u16* out)
 static bool LoadShisConfig(ShisConfig* cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
-
     FsFileSystem fs;
     Result rc = fsOpenSdCardFileSystem(&fs);
     if (R_FAILED(rc)) return false;
-
     FsFile file;
     rc = fsFsOpenFile(&fs, SHIS_CONFIG_PATH, FsOpenMode_Read, &file);
-    if (R_FAILED(rc)) {
-        fsFsClose(&fs);
-        return false;
-    }
-
+    if (R_FAILED(rc)) { fsFsClose(&fs); return false; }
     s64 fileSize = 0;
     rc = fsFileGetSize(&file, &fileSize);
     if (R_FAILED(rc) || fileSize <= 0 || fileSize >= (s64)sizeof(ConfigBuffer)) {
-        fsFileClose(&file);
-        fsFsClose(&fs);
-        return false;
+        fsFileClose(&file); fsFsClose(&fs); return false;
     }
-
     u64 bytesRead = 0;
     rc = fsFileRead(&file, 0, ConfigBuffer, (u64)fileSize, 0, &bytesRead);
-    fsFileClose(&file);
-    fsFsClose(&fs);
+    fsFileClose(&file); fsFsClose(&fs);
     if (R_FAILED(rc) || bytesRead != (u64)fileSize) return false;
     ConfigBuffer[fileSize] = 0;
 
@@ -101,13 +96,8 @@ static bool LoadShisConfig(ShisConfig* cfg)
     while (*cursor) {
         char* line = cursor;
         char* nl = strchr(cursor, '\n');
-        if (nl) {
-            *nl = 0;
-            cursor = nl + 1;
-        } else {
-            cursor += strlen(cursor);
-        }
-
+        if (nl) { *nl = 0; cursor = nl + 1; }
+        else cursor += strlen(cursor);
         line = Trim(line);
         if (!*line || *line == '#' || *line == ';') continue;
         char* eq = strchr(line, '=');
@@ -115,7 +105,6 @@ static bool LoadShisConfig(ShisConfig* cfg)
         *eq = 0;
         char* key = Trim(line);
         char* value = Trim(eq + 1);
-
         if (!strcmp(key, "relay_host")) {
             if (!CopyValue(cfg->host, sizeof(cfg->host), value)) return false;
         } else if (!strcmp(key, "relay_port")) {
@@ -126,22 +115,12 @@ static bool LoadShisConfig(ShisConfig* cfg)
             if (!CopyValue(cfg->key, sizeof(cfg->key), value)) return false;
         }
     }
-
     return cfg->host[0] && cfg->port && cfg->stream[0] && cfg->key[0];
 }
 
-static u16 ReadBE16(const u8* p)
-{
-    return ((u16)p[0] << 8) | p[1];
-}
+static u16 ReadBE16(const u8* p) { return ((u16)p[0] << 8) | p[1]; }
+static u32 ReadBE32(const u8* p) { return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3]; }
 
-static u32 ReadBE32(const u8* p)
-{
-    return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3];
-}
-
-// sfdnsres serializes hostent data in Nintendo's network resolver format.
-// This parser intentionally mirrors libnx resolver.c but uses static memory.
 static bool ResolveIPv4(const char* host, u32* outAddr)
 {
     u32 hErr = 0, nErr = 0, serialized = 0;
@@ -149,30 +128,23 @@ static bool ResolveIPv4(const char* host, u32* outAddr)
     Result rc = sfdnsresGetHostByNameRequest(0, false, host, &hErr, &nErr,
         DnsBuffer, sizeof(DnsBuffer), &serialized);
     if (R_FAILED(rc) || hErr != 0 || serialized < 16 || serialized > sizeof(DnsBuffer)) return false;
-
     const u8* p = DnsBuffer;
     const u8* end = DnsBuffer + serialized;
-
     size_t nameLen = BoundedStrlen((const char*)p, (size_t)(end - p));
     if (p + nameLen + 1 > end) return false;
     p += nameLen + 1;
-
     if (p + 4 > end) return false;
-    u32 aliases = ReadBE32(p);
-    p += 4;
+    u32 aliases = ReadBE32(p); p += 4;
     for (u32 i = 0; i < aliases; ++i) {
         size_t len = BoundedStrlen((const char*)p, (size_t)(end - p));
         if (p + len + 1 > end) return false;
         p += len + 1;
     }
-
     if (p + 8 > end) return false;
     u16 addrType = ReadBE16(p); p += 2;
     u16 addrLen = ReadBE16(p); p += 2;
     u32 count = ReadBE32(p); p += 4;
     if (addrType != AF_INET || addrLen != 4 || count == 0 || p + 4 > end) return false;
-
-    // Match libnx gethostbyname()'s conversion for Nintendo's serialized address.
     u32 raw = 0;
     memcpy(&raw, p, sizeof(raw));
     *outAddr = ntohl(raw);
@@ -183,29 +155,23 @@ static int ConnectRelay(const ShisConfig* cfg)
 {
     u32 address = 0;
     if (!ResolveIPv4(cfg->host, &address)) return SOCKET_INVALID;
-
     int sock = bsdSocket(AF_INET, SOCK_STREAM, 0);
     if (sock == SOCKET_INVALID) return SOCKET_INVALID;
-
     int one = 1;
     (void)bsdSetSockOpt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(cfg->port);
     addr.sin_addr.s_addr = address;
-
     if (bsdConnect(sock, (const struct sockaddr*)&addr, sizeof(addr)) == -1) {
-        SocketClose(&sock);
-        return SOCKET_INVALID;
+        SocketClose(&sock); return SOCKET_INVALID;
     }
 
     char auth[SHIS_AUTH_MAX];
     const char prefix[] = "SHIS/1 ";
     size_t used = 0;
     size_t n = sizeof(prefix) - 1;
-    if (n >= sizeof(auth)) { SocketClose(&sock); return SOCKET_INVALID; }
     memcpy(auth + used, prefix, n); used += n;
     n = strlen(cfg->stream);
     if (used + n + 1 >= sizeof(auth)) { SocketClose(&sock); return SOCKET_INVALID; }
@@ -215,27 +181,17 @@ static int ConnectRelay(const ShisConfig* cfg)
     if (used + n + 1 >= sizeof(auth)) { SocketClose(&sock); return SOCKET_INVALID; }
     memcpy(auth + used, cfg->key, n); used += n;
     auth[used++] = '\n';
-
-    if (!SocketSendAll(sock, auth, (u32)used)) {
-        SocketClose(&sock);
-        return SOCKET_INVALID;
-    }
-
+    if (!SocketSendAll(sock, auth, (u32)used)) { SocketClose(&sock); return SOCKET_INVALID; }
     char response[3] = {0};
     if (!SocketRecevExact(sock, response, sizeof(response)) || memcmp(response, "OK\n", 3) != 0) {
-        SocketClose(&sock);
-        return SOCKET_INVALID;
+        SocketClose(&sock); return SOCKET_INVALID;
     }
-
     return sock;
 }
 
 static void WriteLE32(u8* p, u32 v)
 {
-    p[0] = (u8)v;
-    p[1] = (u8)(v >> 8);
-    p[2] = (u8)(v >> 16);
-    p[3] = (u8)(v >> 24);
+    p[0] = (u8)v; p[1] = (u8)(v >> 8); p[2] = (u8)(v >> 16); p[3] = (u8)(v >> 24);
 }
 
 static void WriteLE64(u8* p, u64 v)
@@ -247,76 +203,147 @@ static bool HasIDR(const u8* data, u32 size)
 {
     for (u32 i = 0; i + 5 <= size; ++i) {
         if (data[i] == 0 && data[i + 1] == 0) {
-            if (i + 4 < size && data[i + 2] == 0 && data[i + 3] == 1)
-                if ((data[i + 4] & 0x1F) == 5) return true;
-            if (i + 3 < size && data[i + 2] == 1)
-                if ((data[i + 3] & 0x1F) == 5) return true;
+            if (i + 4 < size && data[i + 2] == 0 && data[i + 3] == 1 && (data[i + 4] & 0x1F) == 5) return true;
+            if (i + 3 < size && data[i + 2] == 1 && (data[i + 3] & 0x1F) == 5) return true;
         }
     }
     return false;
 }
 
-static bool SendVideoPacket(int sock)
+static void InstallRelay(int sock)
 {
-    if ((VPkt.Header.MetaData & PacketMeta_Content_Mask) != PacketMeta_Content_Data || VPkt.Header.DataSize == 0)
-        return true;
+    mutexLock(&RelayMutex);
+    if (RelaySocket != SOCKET_INVALID) SocketClose(&RelaySocket);
+    RelaySocket = sock;
+    RelayGeneration++;
+    mutexUnlock(&RelayMutex);
+}
 
+static void DropRelay(void)
+{
+    mutexLock(&RelayMutex);
+    if (RelaySocket != SOCKET_INVALID) SocketClose(&RelaySocket);
+    RelaySocket = SOCKET_INVALID;
+    RelayGeneration++;
+    mutexUnlock(&RelayMutex);
+}
+
+static bool GetRelayGeneration(u32* generation)
+{
+    bool connected;
+    mutexLock(&RelayMutex);
+    connected = RelaySocket != SOCKET_INVALID;
+    *generation = RelayGeneration;
+    mutexUnlock(&RelayMutex);
+    return connected;
+}
+
+static bool SendFrame(u8 kind, u8 flags, u64 timestamp, const u8* data, u32 size)
+{
     u8 header[SHIS_RELAY_HEADER_SIZE];
     memset(header, 0, sizeof(header));
     memcpy(header, "SHFR", 4);
-    header[4] = SHIS_KIND_VIDEO;
-    header[5] = HasIDR(VPkt.Data, VPkt.Header.DataSize) ? 1 : 0;
-    WriteLE64(header + 8, VPkt.Header.Timestamp);
-    WriteLE32(header + 16, VPkt.Header.DataSize);
+    header[4] = kind;
+    header[5] = flags;
+    WriteLE64(header + 8, timestamp);
+    WriteLE32(header + 16, size);
 
-    return SocketSendAll(sock, header, sizeof(header)) &&
-        SocketSendAll(sock, VPkt.Data, VPkt.Header.DataSize);
+    bool ok = false;
+    mutexLock(&RelayMutex);
+    if (RelaySocket != SOCKET_INVALID) {
+        ok = SocketSendAll(RelaySocket, header, sizeof(header)) && SocketSendAll(RelaySocket, data, size);
+        if (!ok) {
+            SocketClose(&RelaySocket);
+            RelaySocket = SOCKET_INVALID;
+            RelayGeneration++;
+        }
+    }
+    mutexUnlock(&RelayMutex);
+    return ok;
+}
+
+static bool SendVideoPacket(void)
+{
+    if ((VPkt.Header.MetaData & PacketMeta_Content_Data) == 0 || VPkt.Header.DataSize == 0) return true;
+    return SendFrame(SHIS_KIND_VIDEO, HasIDR(VPkt.Data, VPkt.Header.DataSize) ? 1 : 0,
+        VPkt.Header.Timestamp, VPkt.Data, VPkt.Header.DataSize);
+}
+
+static bool SendAudioPacket(void)
+{
+    if ((APkt.Header.MetaData & PacketMeta_Content_Data) == 0 || APkt.Header.DataSize == 0) return true;
+    return SendFrame(SHIS_KIND_AUDIO, 0, APkt.Header.Timestamp, APkt.Data, APkt.Header.DataSize);
 }
 
 static void SHIS_VideoThread(void* unused)
 {
     (void)unused;
-
     while (IsThreadRunning) {
         ShisConfig cfg;
-        if (!LoadShisConfig(&cfg)) {
-            svcSleepThread(SHIS_RETRY_NS);
-            continue;
-        }
-
+        if (!LoadShisConfig(&cfg)) { svcSleepThread(SHIS_RETRY_NS); continue; }
         int relay = ConnectRelay(&cfg);
-        if (relay == SOCKET_INVALID) {
-            svcSleepThread(SHIS_RETRY_NS);
-            continue;
-        }
-
+        if (relay == SOCKET_INVALID) { svcSleepThread(SHIS_RETRY_NS); continue; }
+        InstallRelay(relay);
         CaptureSetNalHashing(false, false);
         CaptureSetPPSSPSInject(true);
         CaptureVideoConnected();
-
         while (IsThreadRunning) {
             bool valid = CaptureReadVideo();
             if (!IsThreadRunning) break;
             if (!valid) continue;
-            if (!SendVideoPacket(relay)) break;
+            if (!SendVideoPacket()) break;
         }
-
-        SocketClose(&relay);
+        DropRelay();
         if (IsThreadRunning) svcSleepThread(SHIS_RETRY_NS);
+    }
+}
+
+static void SHIS_AudioThread(void* unused)
+{
+    (void)unused;
+    u32 activeGeneration = 0;
+    while (IsThreadRunning) {
+        u32 generation = 0;
+        if (!GetRelayGeneration(&generation)) {
+            activeGeneration = 0;
+            svcSleepThread(SHIS_AUDIO_WAIT_NS);
+            continue;
+        }
+        if (generation != activeGeneration) {
+            CaptureSetAudioBatching(0);
+            CaptureAudioConnected();
+            activeGeneration = generation;
+        }
+        bool valid = CaptureReadAudio();
+        if (!IsThreadRunning) break;
+        if (!valid) continue;
+        if (!SendAudioPacket()) {
+            activeGeneration = 0;
+            svcSleepThread(SHIS_AUDIO_WAIT_NS);
+        }
     }
 }
 
 static void SHIS_Init(void)
 {
+    mutexInit(&RelayMutex);
+    RelaySocket = SOCKET_INVALID;
+    RelayGeneration = 0;
     CaptureSetNalHashing(false, false);
     CaptureSetPPSSPSInject(true);
+    CaptureSetAudioBatching(0);
+}
+
+static void SHIS_Exit(void)
+{
+    DropRelay();
 }
 
 const StreamMode TCP_MODE = {
     SHIS_Init,
-    NULL,
+    SHIS_Exit,
     SHIS_VideoThread,
-    NULL,
+    SHIS_AudioThread,
     NULL,
     NULL
 };
