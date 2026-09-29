@@ -16,15 +16,43 @@
 #define SHIS_RELAY_HEADER_SIZE 20
 #define SHIS_RETRY_NS 2000000000ULL
 #define SHIS_AUDIO_WAIT_NS 100000000ULL
+#define SHIS_QUEUE_WAIT_NS 1000000ULL
 
 #define SHIS_KIND_VIDEO 1u
 #define SHIS_KIND_AUDIO 2u
+
+// Two full-size H.264 slots are enough to let capture continue while the
+// network thread is sending the previous frame. If both slots fill we do not
+// block GRC capture: queued P-frames are discarded and streaming resumes from
+// the next IDR, avoiding reference-chain corruption.
+#define SHIS_VIDEO_QUEUE_SLOTS 2
+#define SHIS_SLOT_EMPTY 0u
+#define SHIS_SLOT_QUEUED 1u
+#define SHIS_SLOT_SENDING 2u
+
+typedef struct {
+    u8 state;
+    u8 flags;
+    u16 reserved;
+    u32 size;
+    u64 timestamp;
+    u64 sequence;
+    u8 data[VbufSz];
+} ShisVideoSlot;
 
 static char ConfigBuffer[SHIS_CONFIG_MAX];
 static u8 DnsBuffer[SHIS_DNS_MAX];
 static Mutex RelayMutex;
 static int RelaySocket = SOCKET_INVALID;
 static u32 RelayGeneration = 0;
+
+static Mutex VideoQueueMutex;
+static ShisVideoSlot VideoQueue[SHIS_VIDEO_QUEUE_SLOTS];
+static u64 VideoQueueSequence = 0;
+static bool VideoNeedsIDR = true;
+
+static Thread SenderThread;
+static u8 alignas(0x1000) SenderThreadStack[0x2000 + LOGGING_STACK_BOOST];
 
 typedef struct {
     char host[128];
@@ -186,6 +214,12 @@ static int ConnectRelay(const ShisConfig* cfg)
     if (!SocketRecevExact(sock, response, sizeof(response)) || memcmp(response, "OK\n", 3) != 0) {
         SocketClose(&sock); return SOCKET_INVALID;
     }
+
+    // Network backpressure must never stall the GRC capture thread. The sender
+    // runs separately and uses SysDVR's poll-aware SocketSendAll on EAGAIN.
+    if (!SocketMakeNonBlocking(sock)) {
+        SocketClose(&sock); return SOCKET_INVALID;
+    }
     return sock;
 }
 
@@ -262,11 +296,104 @@ static bool SendFrame(u8 kind, u8 flags, u64 timestamp, const u8* data, u32 size
     return ok;
 }
 
-static bool SendVideoPacket(void)
+static void MarkVideoDiscontinuity(void)
 {
-    if ((VPkt.Header.MetaData & PacketMeta_Content_Data) == 0 || VPkt.Header.DataSize == 0) return true;
-    return SendFrame(SHIS_KIND_VIDEO, HasIDR(VPkt.Data, VPkt.Header.DataSize) ? 1 : 0,
-        VPkt.Header.Timestamp, VPkt.Data, VPkt.Header.DataSize);
+    mutexLock(&VideoQueueMutex);
+    VideoNeedsIDR = true;
+    for (u32 i = 0; i < SHIS_VIDEO_QUEUE_SLOTS; ++i) {
+        if (VideoQueue[i].state == SHIS_SLOT_QUEUED)
+            VideoQueue[i].state = SHIS_SLOT_EMPTY;
+    }
+    mutexUnlock(&VideoQueueMutex);
+}
+
+static bool QueueVideoPacket(void)
+{
+    if ((VPkt.Header.MetaData & PacketMeta_Content_Data) == 0 || VPkt.Header.DataSize == 0)
+        return true;
+
+    const bool isIDR = HasIDR(VPkt.Data, VPkt.Header.DataSize);
+
+    mutexLock(&VideoQueueMutex);
+
+    // Once any frame is lost, dependent P-frames cannot be decoded reliably.
+    // Wait for a clean random-access point instead of forwarding corruption.
+    if (VideoNeedsIDR && !isIDR) {
+        mutexUnlock(&VideoQueueMutex);
+        return true;
+    }
+
+    if (VideoNeedsIDR && isIDR)
+        VideoNeedsIDR = false;
+
+    int empty = -1;
+    for (u32 i = 0; i < SHIS_VIDEO_QUEUE_SLOTS; ++i) {
+        if (VideoQueue[i].state == SHIS_SLOT_EMPTY) {
+            empty = (int)i;
+            break;
+        }
+    }
+
+    if (empty < 0) {
+        // Network sender fell behind. Never block CaptureReadVideo: discard any
+        // frame that has not started sending and restart the dependency chain.
+        for (u32 i = 0; i < SHIS_VIDEO_QUEUE_SLOTS; ++i) {
+            if (VideoQueue[i].state == SHIS_SLOT_QUEUED)
+                VideoQueue[i].state = SHIS_SLOT_EMPTY;
+        }
+        VideoNeedsIDR = true;
+
+        for (u32 i = 0; i < SHIS_VIDEO_QUEUE_SLOTS; ++i) {
+            if (VideoQueue[i].state == SHIS_SLOT_EMPTY) {
+                empty = (int)i;
+                break;
+            }
+        }
+
+        if (!isIDR || empty < 0) {
+            mutexUnlock(&VideoQueueMutex);
+            return true;
+        }
+        VideoNeedsIDR = false;
+    }
+
+    ShisVideoSlot* slot = &VideoQueue[empty];
+    slot->flags = isIDR ? 1u : 0u;
+    slot->size = VPkt.Header.DataSize;
+    slot->timestamp = VPkt.Header.Timestamp;
+    slot->sequence = ++VideoQueueSequence;
+    memcpy(slot->data, VPkt.Data, slot->size);
+    slot->state = SHIS_SLOT_QUEUED;
+
+    mutexUnlock(&VideoQueueMutex);
+    return true;
+}
+
+static int AcquireQueuedVideo(void)
+{
+    int selected = -1;
+    u64 lowestSequence = UINT64_MAX;
+
+    mutexLock(&VideoQueueMutex);
+    for (u32 i = 0; i < SHIS_VIDEO_QUEUE_SLOTS; ++i) {
+        if (VideoQueue[i].state == SHIS_SLOT_QUEUED && VideoQueue[i].sequence < lowestSequence) {
+            selected = (int)i;
+            lowestSequence = VideoQueue[i].sequence;
+        }
+    }
+    if (selected >= 0)
+        VideoQueue[selected].state = SHIS_SLOT_SENDING;
+    mutexUnlock(&VideoQueueMutex);
+
+    return selected;
+}
+
+static void ReleaseVideoSlot(int index)
+{
+    if (index < 0 || index >= SHIS_VIDEO_QUEUE_SLOTS) return;
+    mutexLock(&VideoQueueMutex);
+    VideoQueue[index].state = SHIS_SLOT_EMPTY;
+    mutexUnlock(&VideoQueueMutex);
 }
 
 static bool SendAudioPacket(void)
@@ -275,26 +402,85 @@ static bool SendAudioPacket(void)
     return SendFrame(SHIS_KIND_AUDIO, 0, APkt.Header.Timestamp, APkt.Data, APkt.Header.DataSize);
 }
 
+static void SHIS_SenderThread(void* unused)
+{
+    (void)unused;
+
+    while (IsThreadRunning) {
+        u32 generation = 0;
+        if (!GetRelayGeneration(&generation)) {
+            ShisConfig cfg;
+            if (!LoadShisConfig(&cfg)) {
+                svcSleepThread(SHIS_RETRY_NS);
+                continue;
+            }
+
+            int relay = ConnectRelay(&cfg);
+            if (relay == SOCKET_INVALID) {
+                svcSleepThread(SHIS_RETRY_NS);
+                continue;
+            }
+
+            MarkVideoDiscontinuity();
+            InstallRelay(relay);
+            continue;
+        }
+
+        int slotIndex = AcquireQueuedVideo();
+        if (slotIndex < 0) {
+            svcSleepThread(SHIS_QUEUE_WAIT_NS);
+            continue;
+        }
+
+        ShisVideoSlot* slot = &VideoQueue[slotIndex];
+        bool ok = SendFrame(SHIS_KIND_VIDEO, slot->flags, slot->timestamp, slot->data, slot->size);
+        ReleaseVideoSlot(slotIndex);
+
+        if (!ok) {
+            MarkVideoDiscontinuity();
+            DropRelay();
+            if (IsThreadRunning) svcSleepThread(SHIS_RETRY_NS);
+        }
+    }
+}
+
 static void SHIS_VideoThread(void* unused)
 {
     (void)unused;
+    u32 activeGeneration = 0;
+
+    CaptureSetNalHashing(false, false);
+    CaptureSetPPSSPSInject(true);
+    CaptureVideoConnected();
+
     while (IsThreadRunning) {
-        ShisConfig cfg;
-        if (!LoadShisConfig(&cfg)) { svcSleepThread(SHIS_RETRY_NS); continue; }
-        int relay = ConnectRelay(&cfg);
-        if (relay == SOCKET_INVALID) { svcSleepThread(SHIS_RETRY_NS); continue; }
-        InstallRelay(relay);
-        CaptureSetNalHashing(false, false);
-        CaptureSetPPSSPSInject(true);
-        CaptureVideoConnected();
-        while (IsThreadRunning) {
-            bool valid = CaptureReadVideo();
-            if (!IsThreadRunning) break;
-            if (!valid) continue;
-            if (!SendVideoPacket()) break;
+        bool valid = CaptureReadVideo();
+        if (!IsThreadRunning) break;
+
+        u32 generation = 0;
+        bool connected = GetRelayGeneration(&generation);
+        if (!connected) {
+            activeGeneration = 0;
+            MarkVideoDiscontinuity();
+            continue;
         }
-        DropRelay();
-        if (IsThreadRunning) svcSleepThread(SHIS_RETRY_NS);
+
+        if (generation != activeGeneration) {
+            // Force SysDVR parameter injection on a new relay session and make
+            // the queue wait for a fresh IDR before forwarding video.
+            CaptureVideoConnected();
+            MarkVideoDiscontinuity();
+            activeGeneration = generation;
+        }
+
+        if (!valid) {
+            // GRC can reject an oversized/corrupt frame. Never let subsequent
+            // dependent P-frames reach the decoder after such a discontinuity.
+            MarkVideoDiscontinuity();
+            continue;
+        }
+
+        QueueVideoPacket();
     }
 }
 
@@ -327,16 +513,29 @@ static void SHIS_AudioThread(void* unused)
 static void SHIS_Init(void)
 {
     mutexInit(&RelayMutex);
+    mutexInit(&VideoQueueMutex);
     RelaySocket = SOCKET_INVALID;
     RelayGeneration = 0;
+    memset(VideoQueue, 0, sizeof(VideoQueue));
+    VideoQueueSequence = 0;
+    VideoNeedsIDR = true;
+
     CaptureSetNalHashing(false, false);
     CaptureSetPPSSPSInject(true);
     CaptureSetAudioBatching(0);
+
+    memset(SenderThreadStack, 0, sizeof(SenderThreadStack));
+    LaunchThread(&SenderThread, SHIS_SenderThread, NULL,
+        SenderThreadStack, sizeof(SenderThreadStack), 0x2D);
 }
 
 static void SHIS_Exit(void)
 {
+    // IsThreadRunning is already false when Core calls ExitFn. Closing the
+    // relay makes any pending non-blocking send leave promptly.
     DropRelay();
+    JoinThread(&SenderThread);
+    MarkVideoDiscontinuity();
 }
 
 const StreamMode TCP_MODE = {
