@@ -54,12 +54,12 @@ jobs:
           stream_key=YOUR_STREAM_KEY
           EOF
           cat > "$OUT/LEEME_SHIS_SYSDVR.txt" <<'EOF'
-          SysDVR-SHIS Direct v0.4 experimental.
+          SysDVR-SHIS Direct v0.5 experimental.
 
           Includes:
           - Direct H.264 video + PCM16 audio to SHIS relay.
           - Dedicated network sender thread: GRC video capture never waits for Railway.
-          - Two-slot static video queue with no dynamic allocations.
+          - Four-slot static video queue cushions brief TCP stalls (about 133 ms at 30 fps).
           - If network backpressure drops a frame, dependent P-frames are discarded until the next IDR instead of corrupting the picture.
           - Invalid/oversized capture packets also force a clean IDR recovery.
           - Relay socket is switched to non-blocking mode after authentication.
@@ -72,5 +72,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SysDVR-SHIS-Direct-v0.4
+          name: SysDVR-SHIS-Direct-v0.5
           path: release/**
