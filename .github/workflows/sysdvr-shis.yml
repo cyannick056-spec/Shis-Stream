@@ -26,6 +26,9 @@ jobs:
         shell: bash
         run: |
           cp sysdvr-shis/TCPmode.c upstream/sysmodule/source/modes/TCPmode.c
+          # SysDVR marks SPS/PPS injection packets as DATA|MULTINAL. v0.1 accidentally
+          # accepted only plain DATA packets, dropping exactly the decoder bootstrap.
+          sed -i 's/(VPkt.Header.MetaData & PacketMeta_Content_Mask) != PacketMeta_Content_Data/(VPkt.Header.MetaData \& PacketMeta_Content_Data) == 0/' upstream/sysmodule/source/modes/TCPmode.c
           printf '\nint g_tcpEnableBroadcast = 0;\n' >> upstream/sysmodule/source/modes/TCPmode.c
 
       - name: Build SysDVR SHIS sysmodule
@@ -54,7 +57,8 @@ jobs:
           stream_key=YOUR_STREAM_KEY
           EOF
           cat > "$OUT/LEEME_SHIS_SYSDVR.txt" <<'EOF'
-          SysDVR-SHIS experimental video-only build.
+          SysDVR-SHIS experimental video-only build v0.2.
+          Fix: forwards DATA|MULTINAL packets so SPS/PPS + IDR reach the decoder.
           The normal TCP mode is temporarily replaced by SHIS direct output.
           Remove/disable the separate SHIS Forwarder before testing this build.
           Restore the official SysDVR exefs.nsp to return to normal TCP mode.
@@ -62,5 +66,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SysDVR-SHIS-Direct-v0.1
+          name: SysDVR-SHIS-Direct-v0.2
           path: release/**
