@@ -25,6 +25,7 @@
 // brief radio stalls, throwing away the P-frame chain until the next IDR.
 // Four slots cover ~133 ms at 30 fps while limiting Switch sysmodule memory.
 #define SHIS_VIDEO_QUEUE_SLOTS 4
+#define SHIS_AUDIO_QUEUE_SLOTS 8
 #define SHIS_SLOT_EMPTY 0u
 #define SHIS_SLOT_QUEUED 1u
 #define SHIS_SLOT_SENDING 2u
@@ -39,6 +40,12 @@ typedef struct {
     u8 data[VbufSz];
 } ShisVideoSlot;
 
+typedef struct {
+    u32 size;
+    u64 timestamp;
+    u8 data[AbufSz];
+} ShisAudioSlot;
+
 static char ConfigBuffer[SHIS_CONFIG_MAX];
 static u8 DnsBuffer[SHIS_DNS_MAX];
 static Mutex RelayMutex;
@@ -49,6 +56,10 @@ static Mutex VideoQueueMutex;
 static ShisVideoSlot VideoQueue[SHIS_VIDEO_QUEUE_SLOTS];
 static u64 VideoQueueSequence = 0;
 static bool VideoNeedsIDR = true;
+static Mutex AudioQueueMutex;
+static ShisAudioSlot AudioQueue[SHIS_AUDIO_QUEUE_SLOTS];
+static u32 AudioQueueRead = 0;
+static u32 AudioQueueCount = 0;
 
 static Thread SenderThread;
 static u8 alignas(0x1000) SenderThreadStack[0x2000 + LOGGING_STACK_BOOST];
@@ -281,18 +292,54 @@ static bool SendFrame(u8 kind, u8 flags, u64 timestamp, const u8* data, u32 size
     WriteLE64(header + 8, timestamp);
     WriteLE32(header + 16, size);
 
-    bool ok = false;
+    int socket;
     mutexLock(&RelayMutex);
-    if (RelaySocket != SOCKET_INVALID) {
-        ok = SocketSendAll(RelaySocket, header, sizeof(header)) && SocketSendAll(RelaySocket, data, size);
-        if (!ok) {
-            SocketClose(&RelaySocket);
-            RelaySocket = SOCKET_INVALID;
-            RelayGeneration++;
-        }
-    }
+    socket = RelaySocket;
     mutexUnlock(&RelayMutex);
-    return ok;
+    // Only the sender thread writes to this socket. Never hold RelayMutex
+    // through bsdPoll: capture must keep draining GRC even on a slow link.
+    if (socket == SOCKET_INVALID) return false;
+    return SocketSendAll(socket, header, sizeof(header)) && SocketSendAll(socket, data, size);
+}
+
+static void ClearAudioQueue(void)
+{
+    mutexLock(&AudioQueueMutex);
+    AudioQueueRead = 0;
+    AudioQueueCount = 0;
+    mutexUnlock(&AudioQueueMutex);
+}
+
+static void QueueAudioPacket(void)
+{
+    if ((APkt.Header.MetaData & PacketMeta_Content_Data) == 0 ||
+        APkt.Header.DataSize == 0 || APkt.Header.DataSize > AbufSz) return;
+    mutexLock(&AudioQueueMutex);
+    // PCM has no reference chain: discard the oldest packet when delayed.
+    if (AudioQueueCount == SHIS_AUDIO_QUEUE_SLOTS) {
+        AudioQueueRead = (AudioQueueRead + 1) % SHIS_AUDIO_QUEUE_SLOTS;
+        AudioQueueCount--;
+    }
+    u32 index = (AudioQueueRead + AudioQueueCount) % SHIS_AUDIO_QUEUE_SLOTS;
+    AudioQueue[index].size = APkt.Header.DataSize;
+    AudioQueue[index].timestamp = APkt.Header.Timestamp;
+    memcpy(AudioQueue[index].data, APkt.Data, APkt.Header.DataSize);
+    AudioQueueCount++;
+    mutexUnlock(&AudioQueueMutex);
+}
+
+static bool SendQueuedAudio(bool* hadPacket)
+{
+    ShisAudioSlot packet;
+    mutexLock(&AudioQueueMutex);
+    *hadPacket = AudioQueueCount != 0;
+    if (*hadPacket) {
+        packet = AudioQueue[AudioQueueRead];
+        AudioQueueRead = (AudioQueueRead + 1) % SHIS_AUDIO_QUEUE_SLOTS;
+        AudioQueueCount--;
+    }
+    mutexUnlock(&AudioQueueMutex);
+    return !*hadPacket || SendFrame(SHIS_KIND_AUDIO, 0, packet.timestamp, packet.data, packet.size);
 }
 
 static void MarkVideoDiscontinuity(void)
@@ -387,18 +434,22 @@ static int AcquireQueuedVideo(void)
     return selected;
 }
 
+static u32 QueuedVideoCount(void)
+{
+    u32 count = 0;
+    mutexLock(&VideoQueueMutex);
+    for (u32 i = 0; i < SHIS_VIDEO_QUEUE_SLOTS; ++i)
+        if (VideoQueue[i].state == SHIS_SLOT_QUEUED) count++;
+    mutexUnlock(&VideoQueueMutex);
+    return count;
+}
+
 static void ReleaseVideoSlot(int index)
 {
     if (index < 0 || index >= SHIS_VIDEO_QUEUE_SLOTS) return;
     mutexLock(&VideoQueueMutex);
     VideoQueue[index].state = SHIS_SLOT_EMPTY;
     mutexUnlock(&VideoQueueMutex);
-}
-
-static bool SendAudioPacket(void)
-{
-    if ((APkt.Header.MetaData & PacketMeta_Content_Data) == 0 || APkt.Header.DataSize == 0) return true;
-    return SendFrame(SHIS_KIND_AUDIO, 0, APkt.Header.Timestamp, APkt.Data, APkt.Header.DataSize);
 }
 
 static void SHIS_SenderThread(void* unused)
@@ -421,13 +472,20 @@ static void SHIS_SenderThread(void* unused)
             }
 
             MarkVideoDiscontinuity();
+            ClearAudioQueue();
             InstallRelay(relay);
             continue;
         }
 
         int slotIndex = AcquireQueuedVideo();
         if (slotIndex < 0) {
-            svcSleepThread(SHIS_QUEUE_WAIT_NS);
+            bool hadAudio = false;
+            if (!SendQueuedAudio(&hadAudio)) {
+                MarkVideoDiscontinuity();
+                ClearAudioQueue();
+                DropRelay();
+                if (IsThreadRunning) svcSleepThread(SHIS_RETRY_NS);
+            } else if (!hadAudio) svcSleepThread(SHIS_QUEUE_WAIT_NS);
             continue;
         }
 
@@ -437,8 +495,24 @@ static void SHIS_SenderThread(void* unused)
 
         if (!ok) {
             MarkVideoDiscontinuity();
+            ClearAudioQueue();
             DropRelay();
             if (IsThreadRunning) svcSleepThread(SHIS_RETRY_NS);
+        } else {
+            // PCM packets are shorter than video frames; drain a bounded
+            // batch, but yield if another video frame is waiting.
+            for (u32 i = 0; i < 4; ++i) {
+                if (i > 0 && QueuedVideoCount() != 0) break;
+                bool hadAudio = false;
+                if (!SendQueuedAudio(&hadAudio)) {
+                    MarkVideoDiscontinuity();
+                    ClearAudioQueue();
+                    DropRelay();
+                    if (IsThreadRunning) svcSleepThread(SHIS_RETRY_NS);
+                    break;
+                }
+                if (!hadAudio) break;
+            }
         }
     }
 }
@@ -502,10 +576,7 @@ static void SHIS_AudioThread(void* unused)
         bool valid = CaptureReadAudio();
         if (!IsThreadRunning) break;
         if (!valid) continue;
-        if (!SendAudioPacket()) {
-            activeGeneration = 0;
-            svcSleepThread(SHIS_AUDIO_WAIT_NS);
-        }
+        QueueAudioPacket();
     }
 }
 
@@ -513,11 +584,14 @@ static void SHIS_Init(void)
 {
     mutexInit(&RelayMutex);
     mutexInit(&VideoQueueMutex);
+    mutexInit(&AudioQueueMutex);
     RelaySocket = SOCKET_INVALID;
     RelayGeneration = 0;
     memset(VideoQueue, 0, sizeof(VideoQueue));
     VideoQueueSequence = 0;
     VideoNeedsIDR = true;
+    AudioQueueRead = 0;
+    AudioQueueCount = 0;
 
     CaptureSetNalHashing(false, false);
     CaptureSetPPSSPSInject(true);
