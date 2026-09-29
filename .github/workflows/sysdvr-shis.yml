@@ -26,9 +26,6 @@ jobs:
         shell: bash
         run: |
           cp sysdvr-shis/TCPmode.c upstream/sysmodule/source/modes/TCPmode.c
-          # SysDVR marks SPS/PPS injection packets as DATA|MULTINAL. v0.1 accidentally
-          # accepted only plain DATA packets, dropping exactly the decoder bootstrap.
-          sed -i 's/(VPkt.Header.MetaData & PacketMeta_Content_Mask) != PacketMeta_Content_Data/(VPkt.Header.MetaData \& PacketMeta_Content_Data) == 0/' upstream/sysmodule/source/modes/TCPmode.c
           printf '\nint g_tcpEnableBroadcast = 0;\n' >> upstream/sysmodule/source/modes/TCPmode.c
 
       - name: Build SysDVR SHIS sysmodule
@@ -57,14 +54,23 @@ jobs:
           stream_key=YOUR_STREAM_KEY
           EOF
           cat > "$OUT/LEEME_SHIS_SYSDVR.txt" <<'EOF'
-          SysDVR-SHIS experimental video-only build v0.2.
-          Fix: forwards DATA|MULTINAL packets so SPS/PPS + IDR reach the decoder.
+          SysDVR-SHIS Direct v0.4 experimental.
+
+          Includes:
+          - Direct H.264 video + PCM16 audio to SHIS relay.
+          - Dedicated network sender thread: GRC video capture never waits for Railway.
+          - Two-slot static video queue with no dynamic allocations.
+          - If network backpressure drops a frame, dependent P-frames are discarded until the next IDR instead of corrupting the picture.
+          - Invalid/oversized capture packets also force a clean IDR recovery.
+          - Relay socket is switched to non-blocking mode after authentication.
+          - SPS/PPS injection remains enabled.
+
           The normal TCP mode is temporarily replaced by SHIS direct output.
-          Remove/disable the separate SHIS Forwarder before testing this build.
+          Do not run the old separate SHIS Forwarder with this build.
           Restore the official SysDVR exefs.nsp to return to normal TCP mode.
           EOF
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SysDVR-SHIS-Direct-v0.2
+          name: SysDVR-SHIS-Direct-v0.4
           path: release/**
