@@ -21,11 +21,10 @@
 #define SHIS_KIND_VIDEO 1u
 #define SHIS_KIND_AUDIO 2u
 
-// Two full-size H.264 slots are enough to let capture continue while the
-// network thread is sending the previous frame. If both slots fill we do not
-// block GRC capture: queued P-frames are discarded and streaming resumes from
-// the next IDR, avoiding reference-chain corruption.
-#define SHIS_VIDEO_QUEUE_SLOTS 2
+// Keep a short bounded cushion for TCP send jitter. Two slots overflowed on
+// brief radio stalls, throwing away the P-frame chain until the next IDR.
+// Four slots cover ~133 ms at 30 fps while limiting Switch sysmodule memory.
+#define SHIS_VIDEO_QUEUE_SLOTS 4
 #define SHIS_SLOT_EMPTY 0u
 #define SHIS_SLOT_QUEUED 1u
 #define SHIS_SLOT_SENDING 2u
