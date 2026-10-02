@@ -1,67 +1,99 @@
-# SHIS Stream — SysDVR sender for Nintendo Switch
+# SHIS Stream — Emisor SysDVR para Nintendo Switch
 
-This repository contains the Switch-side sender used by SHIS Stream. The supported implementation is **SysDVR SHIS Direct v0.6** for a Nintendo Switch running Atmosphère.
+Este repositorio contiene la parte de **Nintendo Switch** de SHIS Stream: **SysDVR SHIS Direct v0.6** para una consola con Atmosphère.
 
-It captures game video and audio with SysDVR and sends them directly to the SHIS relay:
+Su trabajo es capturar vídeo y audio del juego con SysDVR y enviarlos directamente al relay de SHIS Stream.
+
+## Cómo funciona
 
 ```text
 Nintendo Switch
   └─ SysDVR SHIS Direct
-       ├─ H.264 video
-       └─ PCM audio
+       ├─ vídeo H.264
+       └─ audio PCM
           ↓ TCP
-Railway SHIS relay
-          ↓
+Relay nativo en Railway
+          ↓ WebRTC
 Cloudflare Realtime SFU
           ↓
-SHIS Discord Activity
-          ↓
-Viewers in Discord
+Activity de SHIS Stream en Discord
 ```
 
-The Switch does not run Discord and does not contain Cloudflare credentials. It only needs the relay TCP endpoint, a logical stream name and a private stream key.
+La Switch no ejecuta Discord y no guarda credenciales de Cloudflare. Solo necesita la dirección TCP del relay, el puerto, el nombre lógico del stream y una clave privada.
 
-The Activity/backend lives in [`cyannick056-spec/Discord`](https://github.com/cyannick056-spec/Discord).
+La Activity, el backend y el relay están en [`cyannick056-spec/Discord`](https://github.com/cyannick056-spec/Discord).
 
-## Build and install
+## Contenido del repositorio
 
-The [Build SysDVR SHIS Direct](https://github.com/cyannick056-spec/Shis-Stream/actions/workflows/sysdvr-shis.yml) workflow builds the customized sysmodule from pinned SysDVR source plus [`sysdvr-shis/TCPmode.c`](sysdvr-shis/TCPmode.c).
+- `sysdvr-shis/TCPmode.c` — transporte SHIS integrado en SysDVR.
+- `.github/workflows/sysdvr-shis.yml` — workflow que compila y empaqueta el módulo para la tarjeta SD.
 
-1. Back up the existing SysDVR files on the SD card.
-2. Download the `SysDVR-SHIS-Direct-v0.6` artifact from a successful workflow run.
-3. Copy its `atmosphere/` and `config/` directories to the root of the SD card.
-4. Edit `/config/sysdvr/shis.ini` with the relay TCP proxy host, port, stream name and private stream key.
-5. Boot Atmosphère and start a game compatible with SysDVR capture.
+El repositorio contiene únicamente lo necesario para el emisor SysDVR usado por SHIS Stream.
 
-Example:
+## Compilar
+
+El workflow **Build SysDVR SHIS Direct** descarga la versión fijada de SysDVR, integra `sysdvr-shis/TCPmode.c` y genera el paquete para Atmosphère.
+
+Puedes ejecutarlo desde GitHub Actions:
+
+[`Build SysDVR SHIS Direct`](https://github.com/cyannick056-spec/Shis-Stream/actions/workflows/sysdvr-shis.yml)
+
+El artefacto generado se llama `SysDVR-SHIS-Direct-v0.6`.
+
+## Instalar en la Switch
+
+1. Descarga el artefacto `SysDVR-SHIS-Direct-v0.6` de un workflow correcto.
+2. Copia sus carpetas `atmosphere/` y `config/` a la raíz de la tarjeta SD.
+3. Edita `/config/sysdvr/shis.ini`.
+4. Reinicia Atmosphère o reinicia el sysmodule correspondiente.
+5. Abre un juego compatible con la captura de SysDVR.
+
+## Configuración
+
+Ejemplo de `/config/sysdvr/shis.ini`:
 
 ```ini
-relay_host=YOUR_RELAY_TCP_HOST
-relay_port=YOUR_RELAY_TCP_PORT
+relay_host=TU_HOST_TCP_DE_RAILWAY
+relay_port=TU_PUERTO_TCP
 stream=shis
-stream_key=YOUR_PRIVATE_STREAM_KEY
+stream_key=TU_CLAVE_PRIVADA
 ```
 
-`relay_host` and `relay_port` point to the **Railway TCP proxy for the native relay**, not the Discord Activity HTTPS URL. `stream_key` must match the relay's server-side `STREAM_KEY`; never commit the real value.
+### `relay_host`
 
-## Repository contents
+Host del **proxy TCP del relay nativo en Railway**. No es la URL HTTPS de la Activity.
 
-- `sysdvr-shis/TCPmode.c` — SHIS direct transport integrated into SysDVR.
-- `.github/workflows/sysdvr-shis.yml` — build and package workflow for the SD-card artifact.
+### `relay_port`
 
-The retired Android/Switchroot sender and standalone Switch forwarder have been removed from the active repository. Their history remains recoverable through Git history, but they are not part of the supported SHIS Stream architecture.
+Puerto público del proxy TCP del relay.
 
-This customized build replaces SysDVR's normal TCP output path with the SHIS relay protocol. To restore ordinary SysDVR TCP mode, restore the official SysDVR `exefs.nsp`.
+### `stream`
 
-## Security
+Nombre lógico de la transmisión. Debe coincidir con la configuración del sistema SHIS Stream.
 
-- Keep `stream_key` private.
-- Do not place Discord, Cloudflare or deployment credentials on the Switch.
-- Real production hostnames, ports and secrets are intentionally not stored in this public repository.
-- Server-side credentials belong in Railway environment variables.
+### `stream_key`
 
-## Project split
+Clave privada usada para autenticar la publicación de la Switch. Debe coincidir con `STREAM_KEY` en el relay.
 
-**This repository:** Switch capture and SysDVR SHIS Direct packaging.
+## Datos enviados
 
-**[`cyannick056-spec/Discord`](https://github.com/cyannick056-spec/Discord):** Discord Activity, authorization, shared scene/editor state, Cloudflare signaling and the native Railway relay.
+SysDVR SHIS Direct entrega al relay:
+
+- vídeo H.264;
+- audio PCM;
+- marcas de tiempo necesarias para mantener la reproducción estable.
+
+El relay se encarga de convertir el audio a Opus y de publicar el stream hacia Cloudflare Realtime SFU. La Switch no necesita implementar WebRTC ni conocer las credenciales del SFU.
+
+## Seguridad
+
+- Mantén `stream_key` en privado.
+- No guardes secretos de Discord o Cloudflare en la Switch.
+- No publiques los endpoints y claves reales de producción en este repositorio.
+- Las credenciales de servidor pertenecen a las variables de entorno de Railway.
+
+## Repositorios de SHIS Stream
+
+**Este repositorio:** captura y envío desde Nintendo Switch mediante SysDVR SHIS Direct.
+
+**[`cyannick056-spec/Discord`](https://github.com/cyannick056-spec/Discord):** Activity de Discord, backend, escenas, editor, autorización, Cloudflare Realtime SFU y relay nativo de Railway.
