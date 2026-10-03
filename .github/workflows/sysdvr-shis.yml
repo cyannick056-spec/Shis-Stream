@@ -26,6 +26,7 @@ jobs:
         shell: bash
         run: |
           cp sysdvr-shis/TCPmode.c upstream/sysmodule/source/modes/TCPmode.c
+          patch upstream/sysmodule/source/modes/TCPmode.c < sysdvr-shis/anti-jitter-v07.patch
           printf '\nint g_tcpEnableBroadcast = 0;\n' >> upstream/sysmodule/source/modes/TCPmode.c
 
       - name: Build SysDVR SHIS sysmodule
@@ -54,14 +55,16 @@ jobs:
           stream_key=YOUR_STREAM_KEY
           EOF
           cat > "$OUT/LEEME_SHIS_SYSDVR.txt" <<'EOF'
-          SysDVR-SHIS Direct v0.6 experimental.
+          SysDVR-SHIS Direct v0.7 anti-jitter experimental.
 
           Includes:
           - Direct H.264 video + PCM16 audio to SHIS relay.
           - Dedicated network sender thread: GRC video capture never waits for Railway.
-          - Four-slot static video queue cushions brief TCP stalls (about 133 ms at 30 fps).
+          - Six-slot static video queue cushions about 200 ms of brief TCP/Wi-Fi stalls at 30 fps.
+          - Larger TCP send buffer absorbs short uplink stalls before the capture queue overflows.
+          - Video gets strict priority over queued PCM when both are waiting; audio can recover independently but a missing H.264 reference frame cannot.
           - Capture threads only queue frames; a single sender writes audio and video without holding the capture state lock through network waits.
-          - If network backpressure drops a frame, dependent P-frames are discarded until the next IDR instead of corrupting the picture.
+          - If network backpressure still drops a referenced frame, dependent P-frames are discarded until the next IDR instead of corrupting the picture.
           - Invalid/oversized capture packets also force a clean IDR recovery.
           - Relay socket is switched to non-blocking mode after authentication.
           - SPS/PPS injection remains enabled.
@@ -73,5 +76,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SysDVR-SHIS-Direct-v0.6
+          name: SysDVR-SHIS-Direct-v0.7-anti-jitter
           path: release/**
