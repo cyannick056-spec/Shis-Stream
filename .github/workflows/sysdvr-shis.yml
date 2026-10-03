@@ -7,6 +7,10 @@ on:
     paths:
       - 'sysdvr-shis/**'
       - '.github/workflows/sysdvr-shis.yml'
+  pull_request:
+    paths:
+      - 'sysdvr-shis/**'
+      - '.github/workflows/sysdvr-shis.yml'
 
 jobs:
   build:
