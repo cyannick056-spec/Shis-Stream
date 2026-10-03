@@ -1,0 +1,39 @@
+--- TCPmode.c
++++ TCPmode.c
+@@ -23,10 +23,11 @@
+ // Keep a short bounded cushion for TCP send jitter. Two slots overflowed on
+ // brief radio stalls, throwing away the P-frame chain until the next IDR.
+-// Four slots cover ~133 ms at 30 fps while limiting Switch sysmodule memory.
+-#define SHIS_VIDEO_QUEUE_SLOTS 4
+-#define SHIS_AUDIO_QUEUE_SLOTS 8
++// Six slots cover ~200 ms at 30 fps. VbufSz is 0x54000, so this stays around
++// 2 MiB of video cushion instead of trading every short Wi-Fi stall for an IDR wait.
++#define SHIS_VIDEO_QUEUE_SLOTS 6
++#define SHIS_AUDIO_QUEUE_SLOTS 12
+ #define SHIS_SLOT_EMPTY 0u
+ #define SHIS_SLOT_QUEUED 1u
+ #define SHIS_SLOT_SENDING 2u
+@@ -190,6 +191,10 @@
+     if (sock == SOCKET_INVALID) return SOCKET_INVALID;
+     int one = 1;
+     (void)bsdSetSockOpt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
++    // Absorb short uplink stalls in the BSD socket before they consume the
++    // capture queue. This does not add a fixed delay when the link is healthy.
++    int sendBuffer = 512 * 1024;
++    (void)bsdSetSockOpt(sock, SOL_SOCKET, SO_SNDBUF, &sendBuffer, sizeof(sendBuffer));
+     struct sockaddr_in addr;
+     memset(&addr, 0, sizeof(addr));
+     addr.sin_family = AF_INET;
+@@ -396,10 +401,12 @@
+         } else {
+             // PCM packets are shorter than video frames; drain a bounded
+-            // batch, but yield if another video frame is waiting.
++            // batch only while video is caught up. A queued video frame wins
++            // immediately because losing PCM is recoverable, while losing a
++            // referenced H.264 frame can freeze the picture until the next IDR.
+             for (u32 i = 0; i < 4; ++i) {
+-                if (i > 0 && QueuedVideoCount() != 0) break;
++                if (QueuedVideoCount() != 0) break;
+                 bool hadAudio = false;
+                 if (!SendQueuedAudio(&hadAudio)) {
+                     MarkVideoDiscontinuity();
