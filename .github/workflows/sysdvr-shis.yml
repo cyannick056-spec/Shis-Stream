@@ -30,7 +30,30 @@ jobs:
         shell: bash
         run: |
           cp sysdvr-shis/TCPmode.c upstream/sysmodule/source/modes/TCPmode.c
-          patch upstream/sysmodule/source/modes/TCPmode.c < sysdvr-shis/anti-jitter-v07.patch
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('upstream/sysmodule/source/modes/TCPmode.c')
+          s = p.read_text()
+          replacements = [
+              (
+                  '// Four slots cover ~133 ms at 30 fps while limiting Switch sysmodule memory.\n#define SHIS_VIDEO_QUEUE_SLOTS 4\n#define SHIS_AUDIO_QUEUE_SLOTS 8',
+                  '// Six slots cover ~200 ms at 30 fps. VbufSz is 0x54000, so this stays around\n// 2 MiB of video cushion instead of trading every short Wi-Fi stall for an IDR wait.\n#define SHIS_VIDEO_QUEUE_SLOTS 6\n#define SHIS_AUDIO_QUEUE_SLOTS 12',
+              ),
+              (
+                  '    int one = 1;\n    (void)bsdSetSockOpt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));',
+                  '    int one = 1;\n    (void)bsdSetSockOpt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));\n    // Absorb short uplink stalls before they consume the capture queue.\n    int sendBuffer = 512 * 1024;\n    (void)bsdSetSockOpt(sock, SOL_SOCKET, SO_SNDBUF, &sendBuffer, sizeof(sendBuffer));',
+              ),
+              (
+                  '            // PCM packets are shorter than video frames; drain a bounded\n            // batch, but yield if another video frame is waiting.\n            for (u32 i = 0; i < 4; ++i) {\n                if (i > 0 && QueuedVideoCount() != 0) break;',
+                  '            // PCM can recover independently; a missing H.264 reference cannot.\n            // Give queued video strict priority, then drain PCM only while caught up.\n            for (u32 i = 0; i < 4; ++i) {\n                if (QueuedVideoCount() != 0) break;',
+              ),
+          ]
+          for old, new in replacements:
+              if old not in s:
+                  raise SystemExit(f'Expected SHIS source block not found: {old[:70]!r}')
+              s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
           printf '\nint g_tcpEnableBroadcast = 0;\n' >> upstream/sysmodule/source/modes/TCPmode.c
 
       - name: Build SysDVR SHIS sysmodule
