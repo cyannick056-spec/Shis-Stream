@@ -36,11 +36,11 @@ jobs:
           s = p.read_text()
           replacements = [
               (
-                  '// Four slots cover ~133 ms at 30 fps while limiting Switch sysmodule memory.\n#define SHIS_VIDEO_QUEUE_SLOTS 4\n#define SHIS_AUDIO_QUEUE_SLOTS 8',
+                  '// Keep capture buffering bounded: four video frames are about 133 ms at 30 fps.\n#define SHIS_VIDEO_QUEUE_SLOTS 4\n#define SHIS_AUDIO_QUEUE_SLOTS 8',
                   '// Six slots cover ~200 ms at 30 fps. VbufSz is 0x54000, so this stays around\n// 2 MiB of video cushion instead of trading every short Wi-Fi stall for an IDR wait.\n#define SHIS_VIDEO_QUEUE_SLOTS 6\n#define SHIS_AUDIO_QUEUE_SLOTS 12',
               ),
               (
-                  '    int one = 1;\n    (void)bsdSetSockOpt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));',
+                  '    int one = 1;\n    (void)bsdSetSockOpt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));\n    // Smaller kernel send buffer limits stale queued video under uplink congestion.\n    int sendBuffer = 256 * 1024;\n    (void)bsdSetSockOpt(sock, SOL_SOCKET, SO_SNDBUF, &sendBuffer, sizeof(sendBuffer));',
                   '    int one = 1;\n    (void)bsdSetSockOpt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));\n    // Absorb short uplink stalls before they consume the capture queue.\n    int sendBuffer = 512 * 1024;\n    (void)bsdSetSockOpt(sock, SOL_SOCKET, SO_SNDBUF, &sendBuffer, sizeof(sendBuffer));',
               ),
               (
@@ -82,13 +82,13 @@ jobs:
           stream_key=YOUR_STREAM_KEY
           EOF
           cat > "$OUT/LEEME_SHIS_SYSDVR.txt" <<'EOF'
-          SysDVR-SHIS Direct v0.7 anti-jitter experimental.
+          SysDVR-SHIS Direct v0.8 Low Latency experimental.
 
           Includes:
           - Direct H.264 video + PCM16 audio to SHIS relay.
           - Dedicated network sender thread: GRC video capture never waits for Railway.
-          - Six-slot static video queue cushions about 200 ms of brief TCP/Wi-Fi stalls at 30 fps.
-          - Larger TCP send buffer absorbs short uplink stalls before the capture queue overflows.
+          - Four-slot static video queue bounds capture backlog to about 133 ms at 30 fps.
+          - Reduced TCP send buffer limits how much stale video can wait inside the socket during congestion.
           - Video gets strict priority over queued PCM when both are waiting; audio can recover independently but a missing H.264 reference frame cannot.
           - Capture threads only queue frames; a single sender writes audio and video without holding the capture state lock through network waits.
           - If network backpressure still drops a referenced frame, dependent P-frames are discarded until the next IDR instead of corrupting the picture.
@@ -103,5 +103,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SysDVR-SHIS-Direct-v0.7-anti-jitter
+          name: SysDVR-SHIS-Direct-v0.8-low-latency
           path: release/**
