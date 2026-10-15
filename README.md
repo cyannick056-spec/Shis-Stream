@@ -1,6 +1,6 @@
 # SHIS Stream — Emisor SysDVR para Nintendo Switch
 
-Este repositorio contiene la parte de **Nintendo Switch** de SHIS Stream: **SysDVR SHIS Direct v0.6** para una consola con Atmosphère.
+Este repositorio contiene la parte de **Nintendo Switch** de SHIS Stream: **SysDVR SHIS Direct v0.8 Low Latency** para una consola con Atmosphère.
 
 Su trabajo es capturar vídeo y audio del juego con SysDVR y enviarlos directamente al relay de SHIS Stream.
 
@@ -32,17 +32,17 @@ El repositorio contiene únicamente lo necesario para el emisor SysDVR usado por
 
 ## Compilar
 
-El workflow **Build SysDVR SHIS Direct** descarga la versión fijada de SysDVR, integra `sysdvr-shis/TCPmode.c` y genera el paquete para Atmosphère.
+El workflow **Build SysDVR SHIS Direct** descarga la fuente fijada de SysDVR 6.3, integra `sysdvr-shis/TCPmode.c` y genera un paquete experimental para Atmosphère.
 
 Puedes ejecutarlo desde GitHub Actions:
 
 [`Build SysDVR SHIS Direct`](https://github.com/cyannick056-spec/Shis-Stream/actions/workflows/sysdvr-shis.yml)
 
-El artefacto generado se llama `SysDVR-SHIS-Direct-v0.6`.
+El artefacto generado se llama `SysDVR-SHIS-Direct-v0.8-low-latency`. Esta variante reduce las colas de captura y el búfer TCP del emisor para limitar el retraso acumulado; no cambia la resolución/fps del codificador ni garantiza eliminar pérdidas de red.
 
 ## Instalar en la Switch
 
-1. Descarga el artefacto `SysDVR-SHIS-Direct-v0.6` de un workflow correcto.
+1. Descarga el artefacto `SysDVR-SHIS-Direct-v0.8-low-latency` de un workflow correcto.
 2. Copia sus carpetas `atmosphere/` y `config/` a la raíz de la tarjeta SD.
 3. Edita `/config/sysdvr/shis.ini`.
 4. Reinicia Atmosphère o reinicia el sysmodule correspondiente.
