@@ -11,7 +11,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 TARGET := SHIS-Direct-Lumi
 BUILD := build
 SOURCES := source
-DATA := data
+DATA :=
 INCLUDES :=
 APP_TITLE := SHIS Direct Lumi
 APP_AUTHOR := SHIS Stream
