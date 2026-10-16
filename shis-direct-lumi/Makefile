@@ -11,7 +11,7 @@ CFLAGS += -I$(DEVKITPRO)/libnx/include
 CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions
 ASFLAGS := $(ARCH)
 LIBDIRS := $(DEVKITPRO)/libnx/lib $(PORTLIBS)
-LIBS := -lnx
+LIBS := $(DEVKITPRO)/libnx/lib/libnx.a
 
 include $(DEVKITPRO)/libnx/switch_rules
 
