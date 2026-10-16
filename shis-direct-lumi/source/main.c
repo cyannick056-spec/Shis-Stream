@@ -1,4 +1,5 @@
 #include <switch.h>
+#include <switch/services/hid.h>
 #include <stdio.h>
 #include <string.h>
 
