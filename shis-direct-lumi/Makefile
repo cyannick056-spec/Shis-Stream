@@ -10,7 +10,6 @@ CFLAGS := -g -Wall -Wextra -O2 -std=gnu11 -ffunction-sections -fdata-sections $(
 CFLAGS += -I$(DEVKITPRO)/libnx/include
 CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions
 ASFLAGS := $(ARCH)
-LDFLAGS = -specs=$(DEVKITPRO)/libnx/switch.specs -g -Wl,-Map,$(notdir $*.map)
 LIBS := -lnx
 
 include $(DEVKITPRO)/libnx/switch_rules
