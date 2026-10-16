@@ -113,7 +113,7 @@ def chunk(kind, data):
     body=kind+data
     return struct.pack("!I",len(data))+body+struct.pack("!I",zlib.crc32(body)&0xffffffff)
 raw=b"".join(b"\x00"+bytes(pixels[y*W*3:(y+1)*W*3]) for y in range(H))
-png=b"\x89PNG\\r\n\x1a\n"+chunk(b"IHDR",struct.pack("!2I5B",W,H,8,2,0,0,0))+chunk(b"IDAT",zlib.compress(raw,9))+chunk(b"IEND",b"")
+png=bytes([137])+b"PNG"+bytes([13,10,26,10])+chunk(b"IHDR",struct.pack("!2I5B",W,H,8,2,0,0,0))+chunk(b"IDAT",zlib.compress(raw,9))+chunk(b"IEND",b"")
 out=Path(__file__).resolve().parents[1]/"data"/"icon.png"
 out.parent.mkdir(parents=True,exist_ok=True)
 out.write_bytes(png)
