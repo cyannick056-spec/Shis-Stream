@@ -16,13 +16,14 @@ ARCH := -march=armv8-a -mtune=cortex-a57
 CFLAGS := -g -Wall -Wextra -O2 -std=gnu11 -ffunction-sections -fdata-sections $(ARCH)
 CFLAGS += -I$(DEVKITPRO)/libnx/include
 LDFLAGS := -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(TARGET).map
-LD := $(CC)
 CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions
 ASFLAGS := $(ARCH)
 LIBDIRS := $(PORTLIBS) $(LIBNX)
 LIBS := -lnx
 
 include $(DEVKITPRO)/libnx/switch_rules
+
+export LD := $(CC)
 
 all: $(TARGET).nro
 
