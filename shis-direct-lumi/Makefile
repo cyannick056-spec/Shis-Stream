@@ -19,7 +19,7 @@ LDFLAGS := -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(TARGET).
 CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions
 ASFLAGS := $(ARCH)
 LIBDIRS := $(PORTLIBS) $(DEVKITPRO)/libnx
-LIBS := -lnx
+LIBS := -L$(DEVKITPRO)/libnx/lib -lnx
 
 include $(DEVKITPRO)/libnx/switch_rules
 
