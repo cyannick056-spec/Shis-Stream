@@ -24,8 +24,6 @@ jobs:
         working-directory: shis-direct-lumi
         run: |
           set -eux
-          echo "DEVKITPRO=$DEVKITPRO"
-          find "$DEVKITPRO/libnx" -maxdepth 3 -type f -name '*nx*' -print | head -80
           make
           test -s SHIS-Direct-Lumi.nro
       - name: Package prototype
@@ -35,9 +33,10 @@ jobs:
           cp shis-direct-lumi/SHIS-Direct-Lumi.nro release/switch/SHIS-Direct-Lumi/
           cp shis-direct-lumi/data/icon.png release/switch/SHIS-Direct-Lumi/
           cp shis-direct-lumi/README.md release/switch/SHIS-Direct-Lumi/LEEME.txt
-          cd release
-          zip -r SHIS-Direct-Lumi-prototype.zip switch
+          test -s release/switch/SHIS-Direct-Lumi/SHIS-Direct-Lumi.nro
       - uses: actions/upload-artifact@v4
         with:
           name: SHIS-Direct-Lumi-prototype
-          path: release/SHIS-Direct-Lumi-prototype.zip
+          path: release/switch/
+          if-no-files-found: error
+          compression-level: 6
