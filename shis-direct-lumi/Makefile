@@ -7,25 +7,22 @@ SOURCES := source
 DATA := data
 INCLUDES :=
 
-CFLAGS := -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -ffunction-sections -fdata-sections
-CFLAGS += $(INCLUDES) -D__SWITCH__
+ARCH := -march=armv8-a -mtune=cortex-a57 -mtp=soft
+CFLAGS := -g -Wall -Wextra -O2 -std=gnu11 -ffunction-sections -fdata-sections $(ARCH)
+CFLAGS += $(INCLUDES)
 CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions
-ASFLAGS := -g
-LDFLAGS := -specs=$(DEVKITPRO)/libnx/switch.specs -Wl,-Map,$(TARGET).map
+ASFLAGS := $(ARCH)
+LDFLAGS = -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 LIBS := -lnx
 
-ifneq ($(strip $(DEVKITPRO)),)
 include $(DEVKITPRO)/libnx/switch_rules
-endif
 
 all: $(TARGET).nro
 
-$(TARGET).elf: $(SOURCES)/main.c
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LIBS)
+$(TARGET).nacp:
+	$(NX_NACP) --create $@ --title "SHIS Direct Lumi" --author "SHIS Stream" --version "0.1.0-prototype"
 
-$(TARGET).nro: $(TARGET).elf
-	$(ELF2NRO) $< $@ --icon=$(DATA)/icon.png --nacp=$(DATA)/$(TARGET).nacp
-	$(NX_NACP) --create $(DATA)/$(TARGET).nacp --title "SHIS Direct Lumi" --author "SHIS Stream" --version "0.1.0-prototype"
+$(TARGET).nro: $(TARGET).elf $(TARGET).nacp $(DATA)/icon.png
 
 clean:
-	rm -rf $(BUILD) $(TARGET).elf $(TARGET).nro $(TARGET).map $(DATA)/$(TARGET).nacp
+	rm -rf $(BUILD) $(TARGET).elf $(TARGET).nro $(TARGET).nacp $(TARGET).map
