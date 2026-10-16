@@ -5,6 +5,7 @@ TOPDIR := $(CURDIR)
 TARGET := SHIS-Direct-Lumi
 BUILD := build
 SOURCES := source
+CFILES := main.c
 DATA := data
 INCLUDES :=
 APP_TITLE := SHIS Direct Lumi
