@@ -1,0 +1,41 @@
+name: Build SHIS Direct Lumi Homebrew App
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, "experiment/shis-direct-lumi-app"]
+    paths:
+      - "shis-direct-lumi/**"
+      - ".github/workflows/shis-direct-lumi.yml"
+  pull_request:
+    paths:
+      - "shis-direct-lumi/**"
+      - ".github/workflows/shis-direct-lumi.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkita64:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate Lumi icon
+        run: python3 shis-direct-lumi/tools/make_icon.py
+      - name: Build NRO
+        working-directory: shis-direct-lumi
+        run: |
+          set -eux
+          make
+          test -s SHIS-Direct-Lumi.nro
+      - name: Package prototype
+        run: |
+          set -eux
+          mkdir -p release/switch/SHIS-Direct-Lumi
+          cp shis-direct-lumi/SHIS-Direct-Lumi.nro release/switch/SHIS-Direct-Lumi/
+          cp shis-direct-lumi/data/icon.png release/switch/SHIS-Direct-Lumi/
+          cp shis-direct-lumi/README.md release/switch/SHIS-Direct-Lumi/LEEME.txt
+          cd release
+          zip -r SHIS-Direct-Lumi-prototype.zip switch
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SHIS-Direct-Lumi-prototype
+          path: release/SHIS-Direct-Lumi-prototype.zip
