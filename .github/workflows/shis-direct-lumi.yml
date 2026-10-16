@@ -24,6 +24,8 @@ jobs:
         working-directory: shis-direct-lumi
         run: |
           set -eux
+          echo "DEVKITPRO=$DEVKITPRO"
+          find "$DEVKITPRO/libnx" -maxdepth 3 -type f -name '*nx*' -print | head -80
           make
           test -s SHIS-Direct-Lumi.nro
       - name: Package prototype
