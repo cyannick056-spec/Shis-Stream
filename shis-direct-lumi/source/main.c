@@ -1,5 +1,4 @@
 #include <switch.h>
-#include <switch/services/hid.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -20,6 +19,9 @@ int main(int argc, char* argv[]) {
     (void)argv;
     consoleInit(NULL);
     socketInitializeDefault();
+    padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+    PadState pad;
+    padInitializeDefault(&pad);
 
     while (appletMainLoop()) {
         consoleClear();
@@ -37,10 +39,10 @@ int main(int argc, char* argv[]) {
         printf("  Importante: no instala ni modifica sysmodules.\n");
 
         consoleUpdate(NULL);
-        hidScanInput();
-        u64 kDown = hidKeysDown(CONTROLLER_P1_AUTO);
-        if (kDown & KEY_B) break;
-        if (kDown & KEY_A) continue;
+        padUpdate(&pad);
+        u64 kDown = padGetButtonsDown(&pad);
+        if (kDown & HidNpadButton_B) break;
+        if (kDown & HidNpadButton_A) continue;
     }
 
     socketExit();
