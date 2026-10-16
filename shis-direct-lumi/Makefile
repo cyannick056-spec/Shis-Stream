@@ -2,14 +2,12 @@
 .PHONY: all clean
 
 TARGET := SHIS-Direct-Lumi
-BUILD := build
 SOURCES := source
 DATA := data
-INCLUDES :=
 
-ARCH := -march=armv8-a -mtune=cortex-a57 -mtp=soft
+ARCH := -march=armv8-a -mtune=cortex-a57
 CFLAGS := -g -Wall -Wextra -O2 -std=gnu11 -ffunction-sections -fdata-sections $(ARCH)
-CFLAGS += $(INCLUDES)
+CFLAGS += -I$(DEVKITPRO)/libnx/include
 CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions
 ASFLAGS := $(ARCH)
 LDFLAGS = -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
@@ -25,4 +23,4 @@ $(TARGET).nacp:
 $(TARGET).nro: $(TARGET).elf $(TARGET).nacp $(DATA)/icon.png
 
 clean:
-	rm -rf $(BUILD) $(TARGET).elf $(TARGET).nro $(TARGET).nacp $(TARGET).map
+	rm -f $(TARGET).elf $(TARGET).nro $(TARGET).nacp $(TARGET).map
