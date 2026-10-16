@@ -10,7 +10,7 @@ CFLAGS := -g -Wall -Wextra -O2 -std=gnu11 -ffunction-sections -fdata-sections $(
 CFLAGS += -I$(DEVKITPRO)/libnx/include
 CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions
 ASFLAGS := $(ARCH)
-LIBDIRS := $(PORTLIBS) $(LIBNX)
+LIBDIRS := $(DEVKITPRO)/libnx/lib $(PORTLIBS)
 LIBS := -lnx
 
 include $(DEVKITPRO)/libnx/switch_rules
